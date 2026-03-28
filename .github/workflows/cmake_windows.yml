@@ -1,0 +1,32 @@
+name: Windows
+
+on:
+  push:
+    branches:
+      - main  # Trigger on push
+  pull_request:
+    branches:
+      - main  # Trigger on pull
+
+jobs:
+  build:
+    runs-on: windows-latest  # Use Windows environment for the build
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4  # Checkout the repository code
+
+    - name: Install libcurl via vcpkg
+      run: vcpkg install curl:x64-windows
+
+    - name: Set up Visual Studio
+      uses: microsoft/setup-msbuild@v2  # Set up Visual Studio environment (MSBuild)
+
+    - name: Configure CMake
+      run: cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+    - name: Build
+      run: cmake --build build --config Release  # Build the project using CMake with Release configuration
+
+    - name: Run Async-HTTPApp
+      run: .\build\Release\Async-HTTPApp.exe  # Run the built executable

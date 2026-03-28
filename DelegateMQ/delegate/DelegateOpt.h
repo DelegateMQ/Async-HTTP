@@ -1,0 +1,200 @@
+#ifndef _DELEGATE_OPT_H
+#define _DELEGATE_OPT_H
+
+/// @file
+/// @brief Delegate library options header file.
+
+#include <chrono>
+#include <mutex>
+
+// RTTI Detection Check
+#if !defined(__cpp_rtti) && !defined(__GXX_RTTI) && !defined(_CPPRTTI)
+    #error "RTTI compiler option is disabled but required by the DelegateMQ library."
+#endif
+
+#if defined(DMQ_THREAD_STDLIB) || defined(DMQ_THREAD_WIN32) || defined(DMQ_THREAD_QT)
+    // Windows / Linux / macOS / Qt (Standard Library)
+    #include <condition_variable>
+#elif defined(DMQ_THREAD_FREERTOS)
+    #include "predef/util/FreeRTOSClock.h"
+    #include "predef/util/FreeRTOSMutex.h"
+    #include "predef/util/FreeRTOSConditionVariable.h"
+#elif defined(DMQ_THREAD_THREADX)
+    #include "predef/util/ThreadXClock.h"
+    #include "predef/util/ThreadXMutex.h"
+    #include "predef/util/ThreadXConditionVariable.h"
+#elif defined(DMQ_THREAD_ZEPHYR)
+    #include "predef/util/ZephyrClock.h"
+    #include "predef/util/ZephyrMutex.h"
+#elif defined(DMQ_THREAD_CMSIS_RTOS2)
+    #include "predef/util/CmsisRtos2Clock.h"
+    #include "predef/util/CmsisRtos2Mutex.h"
+#else
+    #include "predef/util/BareMetalClock.h"
+#endif
+
+namespace dmq
+{
+    // @TODO: Change aliases to switch clock type globally if necessary
+
+    // --- CLOCK SELECTION ---
+#if defined(DMQ_THREAD_STDLIB) || defined(DMQ_THREAD_WIN32) || defined(DMQ_THREAD_QT)
+    // Windows / Linux / macOS / Qt
+    using Clock = std::chrono::steady_clock;
+
+#elif defined(DMQ_THREAD_FREERTOS)
+    // Use the custom FreeRTOS wrapper
+    using Clock = dmq::FreeRTOSClock;
+
+#elif defined(DMQ_THREAD_THREADX)
+    // Use the custom ThreadX wrapper
+    using Clock = dmq::ThreadXClock;
+
+#elif defined(DMQ_THREAD_ZEPHYR)
+    // Use the custom Zephyr wrapper
+    using Clock = dmq::ZephyrClock;
+
+#elif defined(DMQ_THREAD_CMSIS_RTOS2)
+    using Clock = dmq::CmsisRtos2Clock;
+
+#else
+    // Assuming implemented the 'g_ticks' variable
+    using Clock = dmq::BareMetalClock;
+#endif
+
+    // --- GENERIC TYPES ---
+    // Automatically adapt to the underlying Clock's traits
+    using Duration = typename Clock::duration;
+    using TimePoint = typename Clock::time_point;
+
+    // --- MUTEX / LOCK SELECTION ---
+#if defined(DMQ_THREAD_STDLIB) || defined(DMQ_THREAD_WIN32) || defined(DMQ_THREAD_QT)
+    // Windows / Linux / macOS / Qt
+    using Mutex = std::mutex;
+    using RecursiveMutex = std::recursive_mutex;
+    using ConditionVariable = std::condition_variable;
+
+#elif defined(DMQ_THREAD_FREERTOS)
+    // Use the custom FreeRTOS wrapper
+    using Mutex = dmq::FreeRTOSMutex;
+    using RecursiveMutex = dmq::FreeRTOSRecursiveMutex;
+    using ConditionVariable = dmq::FreeRTOSConditionVariable;
+
+#elif defined(DMQ_THREAD_THREADX)
+    // Use the custom ThreadX wrapper
+    using Mutex = dmq::ThreadXMutex;
+    using RecursiveMutex = dmq::ThreadXRecursiveMutex;
+    using ConditionVariable = dmq::ThreadXConditionVariable;
+
+#elif defined(DMQ_THREAD_ZEPHYR)
+    // Use the custom Zephyr wrapper
+    using Mutex = dmq::ZephyrMutex;
+    using RecursiveMutex = dmq::ZephyrRecursiveMutex;
+
+#elif defined(DMQ_THREAD_CMSIS_RTOS2)
+    using Mutex = dmq::CmsisRtos2Mutex;
+    using RecursiveMutex = dmq::CmsisRtos2RecursiveMutex;
+
+#else
+    // Bare metal has no threads, so no locking is required.
+    // We define a dummy "No-Op" mutex.
+    struct NullMutex {
+        void lock() {}
+        void unlock() {}
+    };
+    using Mutex = NullMutex;
+    using RecursiveMutex = NullMutex;
+#endif
+}
+
+// Detect if exceptions are disabled at the compiler level
+#if !defined(__cpp_exceptions)
+    #ifndef DMQ_ASSERTS
+        #define DMQ_ASSERTS  // Force asserts if exceptions are off
+    #endif
+#endif
+
+// @TODO: Select the desired software fault handling (see Predef.cmake).
+#ifdef DMQ_ASSERTS
+    #include "predef/util/Fault.h"
+    #include <cassert>
+    // Use assert error handling. Change assert to a different error 
+    // handler as required by the target application.
+    #define BAD_ALLOC() assert(false && "Memory allocation failed!")
+#else
+    #include "predef/util/Fault.h"
+    #include <new>
+    // Use exception error handling
+    #define BAD_ALLOC() throw std::bad_alloc()
+#endif
+
+// @TODO: Select the desired heap allocation (see Predef.cmake).
+// If DMQ_ASSERTS defined above, consider defining DMQ_ALLOCATOR to prevent 
+// std::list usage within delegate library from throwing a std::bad_alloc 
+// exception. The std_allocator calls assert if out of memory. 
+// See master CMakeLists.txt for info on enabling the fixed-block allocator.
+#ifdef DMQ_ALLOCATOR
+    // Use stl_allocator fixed-block allocator for dynamic storage allocation
+    #include "predef/allocator/xstring.h"
+    #include "predef/allocator/xlist.h"
+    #include "predef/allocator/xsstream.h"
+    #include "predef/allocator/stl_allocator.h"
+    #include "predef/allocator/xnew.h"
+#else
+    #include <string>
+    #include <list>
+    #include <sstream>
+    #include <memory>
+    #include <utility>
+
+    // Not using xallocator; define as nothing
+    #undef XALLOCATOR
+    #define XALLOCATOR
+
+    // Use default std::allocator for dynamic storage allocation
+    template <typename T, typename Alloc = std::allocator<T>>
+    class xlist : public std::list<T, Alloc> {
+    public:
+        using std::list<T, Alloc>::list; // Inherit constructors
+        using std::list<T, Alloc>::operator=;
+    };
+
+    typedef std::basic_ostringstream<char, std::char_traits<char>> xostringstream;
+    typedef std::basic_stringstream<char, std::char_traits<char>> xstringstream;
+
+    typedef std::string xstring;
+    typedef std::wstring xwstring;
+
+    // Fallback xmake_shared — uses std::make_shared when fixed-block allocator is disabled
+    template <typename T, typename... Args>
+    inline std::shared_ptr<T> xmake_shared(Args&&... args)
+    {
+        return std::make_shared<T>(std::forward<Args>(args)...);
+    }
+
+    // Fallback xnew/xdelete — use standard new/delete when fixed-block allocator is disabled
+    template<typename T, typename... Args>
+    inline T* xnew(Args&&... args) {
+        return new(std::nothrow) T(std::forward<Args>(args)...);
+    }
+
+    template<typename T>
+    inline void xdelete(T* p) {
+        delete p;
+    }
+#endif
+
+// @TODO: Select the desired logging (see Predef.cmake).
+#ifdef DMQ_LOG
+    #include <spdlog/spdlog.h>
+    #define LOG_INFO(...)    spdlog::info(__VA_ARGS__)
+    #define LOG_DEBUG(...)   spdlog::debug(__VA_ARGS__)
+    #define LOG_ERROR(...)   spdlog::error(__VA_ARGS__)
+#else
+    // No-op macros when logging disabled
+    #define LOG_INFO(...)    do {} while(0)
+    #define LOG_DEBUG(...)   do {} while(0)
+    #define LOG_ERROR(...)   do {} while(0)
+#endif
+
+#endif // _DELEGATE_OPT_H
