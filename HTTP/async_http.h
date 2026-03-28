@@ -2,17 +2,19 @@
 #define ASYNC_HTTP_H
 
 // Asynchronous HTTP client using C++ Delegates
-// @see https://github.com/endurodave/Async-HTTP
-// @see https://github.com/endurodave/DelegateMQ
+// @see https://github.com/DelegateMQ/Async-HTTP
+// @see https://github.com/DelegateMQ/DelegateMQ
 // David Lafreniere, 2026
 
 // ------------------------------------------------------------------------------------------------
 // ARCHITECTURE OVERVIEW:
 // ------------------------------------------------------------------------------------------------
-// This library wraps libcurl to execute all HTTP operations on a dedicated background thread.
-// This ensures:
-// 1. Thread Safety: The curl handle is owned and accessed serially by a single worker thread.
-// 2. Non-Blocking Callers: HTTP requests complete in the background without stalling the caller.
+// AsyncHttp wraps libcurl to execute all HTTP operations on a dedicated background thread.
+// Each instance owns a Thread and a CURL* handle, ensuring thread safety without any
+// client-side locking.
+//
+// Multiple instances may be created to run independent HTTP clients concurrently — each
+// has its own worker thread and curl handle so their requests execute in parallel.
 //
 // API CATEGORIES:
 // 1. Blocking: GetWait()/PostWait() block the calling thread until the response arrives or
@@ -24,8 +26,8 @@
 //    the caller can overlap work and retrieve the result later.
 //
 // SETUP:
-// Call http_init() once at application startup before any other API.
-// Call http_shutdown() at application exit.
+// Construct an AsyncHttp instance, call init() once before any other API, and call
+// shutdown() when done (or let the destructor handle it).
 // ------------------------------------------------------------------------------------------------
 
 #include "DelegateMQ.h"
@@ -53,55 +55,89 @@ namespace async {
     /// otherwise it fires on the HTTP worker thread.
     using HttpCallback = dmq::UnicastDelegate<void(HttpResponse)>;
 
-    // -------------------------------------------------------------------------
-    // Initialization & Management
-    // -------------------------------------------------------------------------
+    /// Asynchronous HTTP client. Each instance owns a dedicated worker thread and curl handle.
+    /// All HTTP operations on this instance are serialized through its worker thread.
+    ///
+    /// Create multiple instances to run independent clients concurrently — requests to
+    /// different instances execute in parallel on separate threads and curl handles.
+    class AsyncHttp {
+    public:
+        /// @param threadName Identifies the worker thread in debuggers and logs.
+        explicit AsyncHttp(std::string threadName = "HTTP Thread");
 
-    /// Initialize the async HTTP system. Call once at startup before any other API.
-    /// @return 0 on success, non-zero on failure.
-    int http_init();
+        /// Calls shutdown() if the client is still running.
+        ~AsyncHttp();
 
-    /// Shut down the async HTTP system. Blocks until the worker thread exits or
-    /// the timeout expires.
-    int http_shutdown(dmq::Duration timeout = MAX_WAIT);
+        // Non-copyable, non-movable — owns a thread and a curl handle.
+        AsyncHttp(const AsyncHttp&)            = delete;
+        AsyncHttp& operator=(const AsyncHttp&) = delete;
 
-    /// Accessor for the internal worker thread (e.g. to dispatch work directly).
-    Thread* http_get_thread();
+        // -------------------------------------------------------------------------
+        // Initialization & Management
+        // -------------------------------------------------------------------------
 
-    // -------------------------------------------------------------------------
-    // Blocking API — caller blocks until response arrives or timeout expires
-    // -------------------------------------------------------------------------
+        /// Initialize the HTTP client. Safe to call more than once (no-op if already running).
+        /// @return 0 on success, non-zero on failure.
+        int init();
 
-    HttpResponse GetWait(const std::string& url,
-                         dmq::Duration timeout = MAX_WAIT);
+        /// Shut down the HTTP client. Blocks until the worker thread exits or timeout expires.
+        int shutdown(dmq::Duration timeout = MAX_WAIT);
 
-    HttpResponse PostWait(const std::string& url,
-                          const std::string& body,
-                          const std::string& contentType,
-                          dmq::Duration timeout = MAX_WAIT);
+        /// Accessor for the internal worker thread (e.g. to dispatch work directly onto it).
+        Thread* get_thread();
 
-    // -------------------------------------------------------------------------
-    // Fire-and-Forget API — returns immediately; result delivered via callback
-    // -------------------------------------------------------------------------
+        // -------------------------------------------------------------------------
+        // Blocking API — caller blocks until response arrives or timeout expires
+        // -------------------------------------------------------------------------
 
-    /// @note If cb targets a specific thread, OnResponse fires on that thread.
-    ///       If cb is a plain synchronous delegate, it fires on the HTTP worker thread.
-    void Get(const std::string& url, HttpCallback cb);
+        HttpResponse GetWait(const std::string& url,
+                             dmq::Duration timeout = MAX_WAIT);
 
-    void Post(const std::string& url,
-              const std::string& body,
-              const std::string& contentType,
-              HttpCallback cb);
+        HttpResponse PostWait(const std::string& url,
+                              const std::string& body,
+                              const std::string& contentType,
+                              dmq::Duration timeout = MAX_WAIT);
 
-    // -------------------------------------------------------------------------
-    // Future API — returns immediately; caller calls .get() when ready
-    // -------------------------------------------------------------------------
+        // -------------------------------------------------------------------------
+        // Fire-and-Forget API — returns immediately; result delivered via callback
+        // -------------------------------------------------------------------------
 
-    std::future<HttpResponse> Get_future(const std::string& url);
+        /// @note If cb targets a specific thread, OnResponse fires on that thread.
+        ///       If cb is a plain synchronous delegate, it fires on the HTTP worker thread.
+        void Get(const std::string& url, HttpCallback cb);
 
-    std::future<HttpResponse> Post_future(const std::string& url,
-                                          const std::string& body,
-                                          const std::string& contentType);
+        void Post(const std::string& url,
+                  const std::string& body,
+                  const std::string& contentType,
+                  HttpCallback cb);
+
+        // -------------------------------------------------------------------------
+        // Future API — returns immediately; caller calls .get() when ready
+        // -------------------------------------------------------------------------
+
+        std::future<HttpResponse> Get_future(const std::string& url);
+
+        std::future<HttpResponse> Post_future(const std::string& url,
+                                              const std::string& body,
+                                              const std::string& contentType);
+
+    private:
+        Thread m_thread;
+        CURL*  m_curl = nullptr;
+
+        static size_t WriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata);
+
+        HttpResponse HttpGet(const std::string& url);
+        HttpResponse HttpPost(const std::string& url,
+                              const std::string& body,
+                              const std::string& contentType);
+        void DoGetCallback(const std::string& url, HttpCallback cb);
+        void DoPostCallback(const std::string& url,
+                            const std::string& body,
+                            const std::string& contentType,
+                            HttpCallback cb);
+        void HttpCleanup();
+    };
 
 } // namespace async
 

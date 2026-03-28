@@ -17,20 +17,20 @@ static const int OPS_PER_THREAD = 5;  // Keep total low to avoid hammering httpb
 
 // -----------------------------------------------------------------------------
 // Test 1: Multiple std::threads call GetWait() concurrently.
-// The wrapper serializes all requests through the single HttpThread — no curl
-// race conditions, no mutex needed by the caller.
+// The wrapper serializes all requests through m_thread — no curl race conditions,
+// no mutex needed by the caller.
 // -----------------------------------------------------------------------------
-static void Test_Stress_BlockingConcurrent()
+static void Test_Stress_BlockingConcurrent(AsyncHttp& http)
 {
     std::vector<std::thread> threads;
     std::atomic<int> successCount{0};
     std::atomic<int> failCount{0};
 
     for (int t = 0; t < THREAD_COUNT; ++t) {
-        threads.emplace_back([t, &successCount, &failCount]() {
+        threads.emplace_back([&http, &successCount, &failCount]() {
             for (int i = 0; i < OPS_PER_THREAD; ++i) {
-                HttpResponse resp = GetWait("https://httpbin.org/get",
-                                            std::chrono::seconds(15));
+                HttpResponse resp = http.GetWait("https://httpbin.org/get",
+                                                 std::chrono::seconds(15));
                 if (resp.ok())
                     successCount.fetch_add(1);
                 else
@@ -57,7 +57,7 @@ static void Test_Stress_BlockingConcurrent()
 // Test 2: Multiple std::threads issue fire-and-forget Get() calls.
 // Each callback fires (on the HTTP worker thread) and increments a counter.
 // -----------------------------------------------------------------------------
-static void Test_Stress_CallbackConcurrent()
+static void Test_Stress_CallbackConcurrent(AsyncHttp& http)
 {
     constexpr int TOTAL = THREAD_COUNT * OPS_PER_THREAD;
     std::atomic<int> callbackCount{0};
@@ -68,16 +68,16 @@ static void Test_Stress_CallbackConcurrent()
 
     std::vector<std::thread> threads;
     for (int t = 0; t < THREAD_COUNT; ++t) {
-        threads.emplace_back([&fn]() {
+        threads.emplace_back([&http, &fn]() {
             for (int i = 0; i < OPS_PER_THREAD; ++i)
-                Get("https://httpbin.org/get", MakeDelegate(fn));
+                http.Get("https://httpbin.org/get", MakeDelegate(fn));
         });
     }
 
     for (auto& th : threads)
         if (th.joinable()) th.join();
 
-    // Wait for all callbacks — requests are queued on HttpThread, allow generous time
+    // Wait for all callbacks — requests are queued on m_thread, allow generous time
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::seconds(TOTAL * 3 + 10);
     while (callbackCount.load() < TOTAL &&
@@ -91,7 +91,7 @@ static void Test_Stress_CallbackConcurrent()
 // -----------------------------------------------------------------------------
 // Test 3: Mix of blocking and fire-and-forget from different threads
 // -----------------------------------------------------------------------------
-static void Test_Stress_Mixed()
+static void Test_Stress_Mixed(AsyncHttp& http)
 {
     std::atomic<int> blockingDone{0};
     std::atomic<int> callbackDone{0};
@@ -105,9 +105,9 @@ static void Test_Stress_Mixed()
 
     // Half do blocking GETs
     for (int t = 0; t < N; ++t) {
-        threads.emplace_back([&blockingDone]() {
-            HttpResponse resp = GetWait("https://httpbin.org/get",
-                                        std::chrono::seconds(15));
+        threads.emplace_back([&http, &blockingDone]() {
+            HttpResponse resp = http.GetWait("https://httpbin.org/get",
+                                             std::chrono::seconds(15));
             if (resp.ok() || !resp.error.empty())
                 blockingDone.fetch_add(1);
         });
@@ -115,8 +115,8 @@ static void Test_Stress_Mixed()
 
     // Half do fire-and-forget GETs
     for (int t = 0; t < N; ++t) {
-        threads.emplace_back([&fn]() {
-            Get("https://httpbin.org/get", MakeDelegate(fn));
+        threads.emplace_back([&http, &fn]() {
+            http.Get("https://httpbin.org/get", MakeDelegate(fn));
         });
     }
 
@@ -139,15 +139,13 @@ static void Test_Stress_Mixed()
 // -----------------------------------------------------------------------------
 // Main entry point
 // -----------------------------------------------------------------------------
-void Stress_UT()
+void Stress_UT(AsyncHttp& http)
 {
     std::cout << "Running HTTP Thread Safety Stress Tests..." << std::endl;
 
-    http_init();
-
-    Test_Stress_BlockingConcurrent();
-    Test_Stress_CallbackConcurrent();
-    Test_Stress_Mixed();
+    Test_Stress_BlockingConcurrent(http);
+    Test_Stress_CallbackConcurrent(http);
+    Test_Stress_Mixed(http);
 
     std::cout << "HTTP Thread Safety Stress Tests Passed!" << std::endl;
 }

@@ -1,9 +1,9 @@
 // Asynchronous HTTP client using C++ Delegates
-// @see https://github.com/endurodave/Async-HTTP
-// @see https://github.com/endurodave/DelegateMQ
+// @see https://github.com/DelegateMQ/Async-HTTP
+// @see https://github.com/DelegateMQ/DelegateMQ
 // David Lafreniere, 2026
 
-// This application demonstrates the usage patterns for the Async-HTTP wrapper:
+// This application demonstrates the usage patterns for the AsyncHttp class:
 // 1. Blocking GET/POST   — caller blocks until the response arrives.
 // 2. Internal thread     — run work directly on the HTTP thread (uninterrupted sequence).
 // 3. Multithreaded blocking — multiple threads call GetWait() concurrently; timing comparison.
@@ -64,16 +64,16 @@ void printf_safe(const char* format, ...)
 // ---------------------------------------------------------------------------
 // Example 1 — Simple blocking GET and POST
 // ---------------------------------------------------------------------------
-void example1()
+void example1(async::AsyncHttp& http)
 {
     printf_safe("\n--- Example 1: Blocking GET / POST ---\n");
 
-    async::HttpResponse resp = async::GetWait("https://httpbin.org/get");
+    async::HttpResponse resp = http.GetWait("https://httpbin.org/get");
     printf_safe("GET  status=%d  ok=%s\n", resp.statusCode, resp.ok() ? "yes" : "no");
 
-    resp = async::PostWait("https://httpbin.org/post",
-                           "{\"example\":1}",
-                           "application/json");
+    resp = http.PostWait("https://httpbin.org/post",
+                         "{\"example\":1}",
+                         "application/json");
     printf_safe("POST status=%d  ok=%s\n", resp.statusCode, resp.ok() ? "yes" : "no");
 }
 
@@ -83,26 +83,26 @@ void example1()
 // By dispatching directly onto the HTTP thread, several requests execute
 // without interleaving from other callers, analogous to a transaction.
 // ---------------------------------------------------------------------------
-static int RunSequenceOnHttpThread()
+static int RunSequenceOnHttpThread(async::AsyncHttp* http)
 {
-    // This function runs on HttpThread — GetWait/PostWait detect same-thread
+    // This function runs on m_thread — GetWait/PostWait detect same-thread
     // and call curl directly without re-dispatching.
-    auto r1 = async::GetWait("https://httpbin.org/get");
+    auto r1 = http->GetWait("https://httpbin.org/get");
     printf_safe("  seq GET  status=%d\n", r1.statusCode);
 
-    auto r2 = async::PostWait("https://httpbin.org/post", "{}", "application/json");
+    auto r2 = http->PostWait("https://httpbin.org/post", "{}", "application/json");
     printf_safe("  seq POST status=%d\n", r2.statusCode);
 
     return r1.ok() && r2.ok() ? 0 : 1;
 }
 
-void example2()
+void example2(async::AsyncHttp& http)
 {
     printf_safe("\n--- Example 2: Uninterrupted Sequence on HTTP Thread ---\n");
 
-    Thread* httpThread = async::http_get_thread();
+    Thread* httpThread = http.get_thread();
     auto delegate = MakeDelegate(&RunSequenceOnHttpThread, *httpThread, async::MAX_WAIT);
-    auto retVal = delegate.AsyncInvoke();
+    auto retVal = delegate.AsyncInvoke(&http);
     if (retVal.has_value())
         printf_safe("Sequence return value: %d\n", any_cast<int>(retVal.value()));
 }
@@ -113,10 +113,10 @@ void example2()
 // ---------------------------------------------------------------------------
 static std::atomic<int> workersDone{0};
 
-static void WorkerGetWait(std::string threadName)
+static void WorkerGetWait(async::AsyncHttp* http, std::string threadName)
 {
-    async::HttpResponse resp = async::GetWait("https://httpbin.org/get",
-                                              std::chrono::seconds(15));
+    async::HttpResponse resp = http->GetWait("https://httpbin.org/get",
+                                             std::chrono::seconds(15));
     printf_safe("  [%s] GET status=%d\n", threadName.c_str(), resp.statusCode);
 
     if (++workersDone >= WORKER_THREAD_CNT) {
@@ -126,7 +126,7 @@ static void WorkerGetWait(std::string threadName)
     }
 }
 
-std::chrono::microseconds example3()
+std::chrono::microseconds example3(async::AsyncHttp& http)
 {
     printf_safe("\n--- Example 3: Multithreaded Blocking ---\n");
 
@@ -137,7 +137,7 @@ std::chrono::microseconds example3()
 
     for (int i = 0; i < WORKER_THREAD_CNT; ++i) {
         auto delegate = MakeDelegate(WorkerGetWait, workerThreads[i]);
-        delegate(workerThreads[i].GetThreadName());
+        delegate(&http, workerThreads[i].GetThreadName());
     }
 
     std::unique_lock<std::mutex> lock(cvMtx);
@@ -160,7 +160,7 @@ static void OnGetResponse(async::HttpResponse resp)
     completeCallback(0);
 }
 
-std::chrono::microseconds example4()
+std::chrono::microseconds example4(async::AsyncHttp& http)
 {
     printf_safe("\n--- Example 4: Fire-and-Forget with Callback ---\n");
 
@@ -172,8 +172,8 @@ std::chrono::microseconds example4()
     auto start = std::chrono::high_resolution_clock::now();
 
     // Callback targets callbackThread — response is marshalled back there
-    async::Get("https://httpbin.org/get",
-               MakeDelegate(&OnGetResponse, callbackThread));
+    http.Get("https://httpbin.org/get",
+             MakeDelegate(&OnGetResponse, callbackThread));
 
     auto end = std::chrono::high_resolution_clock::now();
     return std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -182,12 +182,12 @@ std::chrono::microseconds example4()
 // ---------------------------------------------------------------------------
 // Example 5 — Future/Async: main thread does work while HTTP runs in background
 // ---------------------------------------------------------------------------
-void example_future()
+void example_future(async::AsyncHttp& http)
 {
     printf_safe("\n--- Example 5: Future / Async ---\n");
 
     // Launch HTTP request — returns immediately
-    auto future = async::Get_future("https://httpbin.org/get");
+    auto future = http.Get_future("https://httpbin.org/get");
     printf_safe("[Main] HTTP request dispatched, doing other work...\n");
 
     // Simulate concurrent main-thread work
@@ -202,9 +202,9 @@ void example_future()
                 resp.statusCode, resp.ok() ? "yes" : "no");
 
     // POST future
-    auto postFuture = async::Post_future("https://httpbin.org/post",
-                                         "{\"future\":true}",
-                                         "application/json");
+    auto postFuture = http.Post_future("https://httpbin.org/post",
+                                       "{\"future\":true}",
+                                       "application/json");
     async::HttpResponse postResp = postFuture.get();
     printf_safe("[Main] POST future: status=%d\n", postResp.statusCode);
 }
@@ -221,19 +221,20 @@ int main()
     for (int i = 0; i < WORKER_THREAD_CNT; ++i)
         workerThreads[i].CreateThread();
 
-    // Initialize async HTTP (starts the HTTP worker thread)
-    int rc = async::http_init();
+    // Create and initialize the async HTTP client
+    async::AsyncHttp http;
+    int rc = http.init();
     if (rc != 0) {
-        fprintf(stderr, "http_init() failed: %d\n", rc);
+        fprintf(stderr, "http.init() failed: %d\n", rc);
         return 1;
     }
 
     // Run examples
-    example1();
-    example2();
-    auto blockingDuration    = example3();
-    auto nonBlockingDuration = example4();
-    example_future();
+    example1(http);
+    example2(http);
+    auto blockingDuration    = example3(http);
+    auto nonBlockingDuration = example4(http);
+    example_future(http);
 
     // Wait for the fire-and-forget callback in example4 to complete
     while (!completeFlag.load())
@@ -247,11 +248,11 @@ int main()
     for (int i = 0; i < WORKER_THREAD_CNT; ++i)
         workerThreads[i].ExitThread();
 
-    // Run unit tests
+    // Run unit tests (creates its own AsyncHttp instance internally)
     RunUnitTests();
 
     // Shutdown HTTP client
-    async::http_shutdown();
+    http.shutdown();
 
     processTimerExit.store(true);
     if (timerThread.joinable())

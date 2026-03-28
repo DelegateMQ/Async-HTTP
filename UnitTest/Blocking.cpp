@@ -10,9 +10,9 @@ using namespace async;
 // -----------------------------------------------------------------------------
 // Test 1: GetWait returns 200 for a known-good URL
 // -----------------------------------------------------------------------------
-static void Test_GetWait_Success()
+static void Test_GetWait_Success(AsyncHttp& http)
 {
-    HttpResponse resp = GetWait("https://httpbin.org/get", std::chrono::seconds(10));
+    HttpResponse resp = http.GetWait("https://httpbin.org/get", std::chrono::seconds(10));
 
     ASSERT_TRUE(resp.ok());
     ASSERT_TRUE(resp.statusCode == 200);
@@ -25,9 +25,9 @@ static void Test_GetWait_Success()
 // -----------------------------------------------------------------------------
 // Test 2: GetWait reflects non-2xx status codes correctly
 // -----------------------------------------------------------------------------
-static void Test_GetWait_404()
+static void Test_GetWait_404(AsyncHttp& http)
 {
-    HttpResponse resp = GetWait("https://httpbin.org/status/404", std::chrono::seconds(10));
+    HttpResponse resp = http.GetWait("https://httpbin.org/status/404", std::chrono::seconds(10));
 
     ASSERT_TRUE(!resp.ok());
     ASSERT_TRUE(resp.statusCode == 404);
@@ -39,10 +39,10 @@ static void Test_GetWait_404()
 // -----------------------------------------------------------------------------
 // Test 3: GetWait with bad host returns a transport error
 // -----------------------------------------------------------------------------
-static void Test_GetWait_ConnectionError()
+static void Test_GetWait_ConnectionError(AsyncHttp& http)
 {
-    HttpResponse resp = GetWait("http://this.host.does.not.exist.invalid/",
-                                std::chrono::seconds(10));
+    HttpResponse resp = http.GetWait("http://this.host.does.not.exist.invalid/",
+                                     std::chrono::seconds(10));
 
     ASSERT_TRUE(!resp.ok());
     ASSERT_TRUE(!resp.error.empty());
@@ -53,13 +53,13 @@ static void Test_GetWait_ConnectionError()
 // -----------------------------------------------------------------------------
 // Test 4: PostWait sends body and receives echo from httpbin
 // -----------------------------------------------------------------------------
-static void Test_PostWait_Success()
+static void Test_PostWait_Success(AsyncHttp& http)
 {
     std::string body        = "{\"key\":\"value\"}";
     std::string contentType = "application/json";
 
-    HttpResponse resp = PostWait("https://httpbin.org/post", body, contentType,
-                                 std::chrono::seconds(10));
+    HttpResponse resp = http.PostWait("https://httpbin.org/post", body, contentType,
+                                      std::chrono::seconds(10));
 
     ASSERT_TRUE(resp.ok());
     ASSERT_TRUE(resp.statusCode == 200);
@@ -72,10 +72,10 @@ static void Test_PostWait_Success()
 // -----------------------------------------------------------------------------
 // Test 5: PostWait reflects 400 status
 // -----------------------------------------------------------------------------
-static void Test_PostWait_StatusError()
+static void Test_PostWait_StatusError(AsyncHttp& http)
 {
-    HttpResponse resp = PostWait("https://httpbin.org/status/400", "", "text/plain",
-                                 std::chrono::seconds(10));
+    HttpResponse resp = http.PostWait("https://httpbin.org/status/400", "", "text/plain",
+                                      std::chrono::seconds(10));
 
     ASSERT_TRUE(!resp.ok());
     ASSERT_TRUE(resp.statusCode == 400);
@@ -86,10 +86,10 @@ static void Test_PostWait_StatusError()
 // -----------------------------------------------------------------------------
 // Test 6: Sequential requests reuse the curl handle correctly
 // -----------------------------------------------------------------------------
-static void Test_SequentialRequests()
+static void Test_SequentialRequests(AsyncHttp& http)
 {
     for (int i = 0; i < 3; ++i) {
-        HttpResponse resp = GetWait("https://httpbin.org/get", std::chrono::seconds(10));
+        HttpResponse resp = http.GetWait("https://httpbin.org/get", std::chrono::seconds(10));
         ASSERT_TRUE(resp.ok());
     }
     std::cout << "  3 sequential requests succeeded" << std::endl;
@@ -98,18 +98,16 @@ static void Test_SequentialRequests()
 // -----------------------------------------------------------------------------
 // Main entry point
 // -----------------------------------------------------------------------------
-void Blocking_UT()
+void Blocking_UT(AsyncHttp& http)
 {
     std::cout << "Running HTTP Blocking API Tests..." << std::endl;
 
-    http_init();
-
-    Test_GetWait_Success();
-    Test_GetWait_404();
-    Test_GetWait_ConnectionError();
-    Test_PostWait_Success();
-    Test_PostWait_StatusError();
-    Test_SequentialRequests();
+    Test_GetWait_Success(http);
+    Test_GetWait_404(http);
+    Test_GetWait_ConnectionError(http);
+    Test_PostWait_Success(http);
+    Test_PostWait_StatusError(http);
+    Test_SequentialRequests(http);
 
     std::cout << "HTTP Blocking API Tests Passed!" << std::endl;
 }

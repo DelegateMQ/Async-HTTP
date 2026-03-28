@@ -28,24 +28,17 @@ static bool WaitForFlag(std::atomic<bool>& flag, std::chrono::milliseconds timeo
 // -----------------------------------------------------------------------------
 // Test 1: Get() with a plain sync callback — fires on HTTP worker thread
 // -----------------------------------------------------------------------------
-static void Test_Get_SyncCallback()
+static void Test_Get_SyncCallback(AsyncHttp& http)
 {
     std::atomic<bool> fired{false};
     std::atomic<int>  receivedStatus{0};
 
-    auto onResponse = +[](HttpResponse resp) {
-        // This runs on the HTTP worker thread.
-        // No access to caller-local variables — use statics to verify.
-    };
-
-    // For verification, use a lambda that captures by reference via a
-    // std::function wrapper (sync delegate holds std::function).
     std::function<void(HttpResponse)> fn = [&](HttpResponse resp) {
         receivedStatus.store(resp.statusCode);
         fired.store(true);
     };
 
-    Get("https://httpbin.org/get", MakeDelegate(fn));
+    http.Get("https://httpbin.org/get", MakeDelegate(fn));
 
     bool ok = WaitForFlag(fired, std::chrono::seconds(15));
     ASSERT_TRUE(ok);
@@ -57,7 +50,7 @@ static void Test_Get_SyncCallback()
 // -----------------------------------------------------------------------------
 // Test 2: Get() with an async callback — fires on callerThread
 // -----------------------------------------------------------------------------
-static void Test_Get_AsyncCallback()
+static void Test_Get_AsyncCallback(AsyncHttp& http)
 {
     Thread callerThread("CallbackCallerThread");
     callerThread.CreateThread();
@@ -65,19 +58,13 @@ static void Test_Get_AsyncCallback()
     std::atomic<bool> fired{false};
     std::atomic<int>  receivedStatus{0};
 
-    // The lambda will be dispatched to callerThread
-    auto onResponse = +[](HttpResponse resp) {
-        // Executed on callerThread — nothing extra to verify here without
-        // thread-local storage; the atomic update proves dispatch happened.
-    };
-
     std::function<void(HttpResponse)> fn = [&](HttpResponse resp) {
         receivedStatus.store(resp.statusCode);
         fired.store(true);
     };
 
-    Get("https://httpbin.org/get",
-        MakeDelegate(fn, callerThread));
+    http.Get("https://httpbin.org/get",
+             MakeDelegate(fn, callerThread));
 
     bool ok = WaitForFlag(fired, std::chrono::seconds(15));
     ASSERT_TRUE(ok);
@@ -91,7 +78,7 @@ static void Test_Get_AsyncCallback()
 // -----------------------------------------------------------------------------
 // Test 3: Post() with sync callback — body delivered to callback
 // -----------------------------------------------------------------------------
-static void Test_Post_SyncCallback()
+static void Test_Post_SyncCallback(AsyncHttp& http)
 {
     std::atomic<bool> fired{false};
     std::string       receivedBody;
@@ -105,10 +92,10 @@ static void Test_Post_SyncCallback()
         fired.store(true);
     };
 
-    Post("https://httpbin.org/post",
-         "{\"sensor\":42}",
-         "application/json",
-         MakeDelegate(fn));
+    http.Post("https://httpbin.org/post",
+              "{\"sensor\":42}",
+              "application/json",
+              MakeDelegate(fn));
 
     bool ok = WaitForFlag(fired, std::chrono::seconds(15));
     ASSERT_TRUE(ok);
@@ -122,7 +109,7 @@ static void Test_Post_SyncCallback()
 // -----------------------------------------------------------------------------
 // Test 4: Multiple concurrent Get() calls — all callbacks arrive
 // -----------------------------------------------------------------------------
-static void Test_MultipleCallbacks()
+static void Test_MultipleCallbacks(AsyncHttp& http)
 {
     constexpr int N = 5;
     std::atomic<int> count{0};
@@ -133,7 +120,7 @@ static void Test_MultipleCallbacks()
     };
 
     for (int i = 0; i < N; ++i)
-        Get("https://httpbin.org/get", MakeDelegate(fn));
+        http.Get("https://httpbin.org/get", MakeDelegate(fn));
 
     // Wait up to 30 s for all N callbacks
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -147,16 +134,14 @@ static void Test_MultipleCallbacks()
 // -----------------------------------------------------------------------------
 // Main entry point
 // -----------------------------------------------------------------------------
-void Callback_UT()
+void Callback_UT(AsyncHttp& http)
 {
     std::cout << "Running HTTP Fire-and-Forget Callback Tests..." << std::endl;
 
-    http_init();
-
-    Test_Get_SyncCallback();
-    Test_Get_AsyncCallback();
-    Test_Post_SyncCallback();
-    Test_MultipleCallbacks();
+    Test_Get_SyncCallback(http);
+    Test_Get_AsyncCallback(http);
+    Test_Post_SyncCallback(http);
+    Test_MultipleCallbacks(http);
 
     std::cout << "HTTP Fire-and-Forget Callback Tests Passed!" << std::endl;
 }

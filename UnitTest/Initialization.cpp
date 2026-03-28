@@ -7,25 +7,23 @@
 using namespace async;
 
 // -----------------------------------------------------------------------------
-// Test 1: Thread is created and accessible after http_init()
+// Test 1: Thread is created and accessible after init()
 // -----------------------------------------------------------------------------
-static void Test_InitAndThread()
+static void Test_InitAndThread(AsyncHttp& http)
 {
-    http_init();
-
-    Thread* thread = http_get_thread();
+    Thread* thread = http.get_thread();
     ASSERT_TRUE(thread != nullptr);
-    ASSERT_TRUE(thread->GetThreadName() == "HTTP Thread");
+    ASSERT_TRUE(!thread->GetThreadName().empty());
     ASSERT_TRUE(thread->GetThreadId() != std::thread::id());
 }
 
 // -----------------------------------------------------------------------------
 // Test 2: Double init does not crash or corrupt state
 // -----------------------------------------------------------------------------
-static void Test_DoubleInit()
+static void Test_DoubleInit(AsyncHttp& http)
 {
-    http_init();  // already initialized
-    Thread* thread = http_get_thread();
+    http.init();  // already initialized — should be a no-op
+    Thread* thread = http.get_thread();
     ASSERT_TRUE(thread != nullptr);
     ASSERT_TRUE(thread->GetThreadId() != std::thread::id());
 }
@@ -33,9 +31,9 @@ static void Test_DoubleInit()
 // -----------------------------------------------------------------------------
 // Test 3: A simple blocking GET succeeds — proves the thread processes requests
 // -----------------------------------------------------------------------------
-static void Test_BasicRequestAfterInit()
+static void Test_BasicRequestAfterInit(AsyncHttp& http)
 {
-    HttpResponse resp = GetWait("https://httpbin.org/get", std::chrono::seconds(10));
+    HttpResponse resp = http.GetWait("https://httpbin.org/get", std::chrono::seconds(10));
 
     // Either the request succeeded or there was a network error.
     // Either way, statusCode is well-defined and no crash occurred.
@@ -45,13 +43,13 @@ static void Test_BasicRequestAfterInit()
 // -----------------------------------------------------------------------------
 // Main entry point
 // -----------------------------------------------------------------------------
-void Initialization_UT()
+void Initialization_UT(AsyncHttp& http)
 {
     std::cout << "Running HTTP Initialization Tests..." << std::endl;
 
-    Test_InitAndThread();
-    Test_DoubleInit();
-    Test_BasicRequestAfterInit();
+    Test_InitAndThread(http);
+    Test_DoubleInit(http);
+    Test_BasicRequestAfterInit(http);
 
     std::cout << "HTTP Initialization Tests Passed!" << std::endl;
 }

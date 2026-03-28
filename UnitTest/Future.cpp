@@ -13,9 +13,9 @@ using namespace async;
 // -----------------------------------------------------------------------------
 // Test 1: Get_future returns a valid future that resolves to 200
 // -----------------------------------------------------------------------------
-static void Test_GetFuture_Success()
+static void Test_GetFuture_Success(AsyncHttp& http)
 {
-    auto future = Get_future("https://httpbin.org/get");
+    auto future = http.Get_future("https://httpbin.org/get");
     ASSERT_TRUE(future.valid());
 
     // Main thread can do other work here...
@@ -31,9 +31,9 @@ static void Test_GetFuture_Success()
 // -----------------------------------------------------------------------------
 // Test 2: Get_future for a 404 URL resolves with the correct status
 // -----------------------------------------------------------------------------
-static void Test_GetFuture_404()
+static void Test_GetFuture_404(AsyncHttp& http)
 {
-    auto future = Get_future("https://httpbin.org/status/404");
+    auto future = http.Get_future("https://httpbin.org/status/404");
     HttpResponse resp = future.get();
 
     ASSERT_TRUE(!resp.ok());
@@ -45,11 +45,11 @@ static void Test_GetFuture_404()
 // -----------------------------------------------------------------------------
 // Test 3: Post_future sends a body and the future resolves with the echo
 // -----------------------------------------------------------------------------
-static void Test_PostFuture_Success()
+static void Test_PostFuture_Success(AsyncHttp& http)
 {
-    auto future = Post_future("https://httpbin.org/post",
-                              "{\"reading\":3.14}",
-                              "application/json");
+    auto future = http.Post_future("https://httpbin.org/post",
+                                   "{\"reading\":3.14}",
+                                   "application/json");
     ASSERT_TRUE(future.valid());
 
     HttpResponse resp = future.get();
@@ -62,15 +62,15 @@ static void Test_PostFuture_Success()
 // -----------------------------------------------------------------------------
 // Test 4: Multiple futures launched before any .get() — concurrent dispatch
 // -----------------------------------------------------------------------------
-static void Test_MultipleFutures()
+static void Test_MultipleFutures(AsyncHttp& http)
 {
     constexpr int N = 4;
     std::vector<std::future<HttpResponse>> futures;
 
     for (int i = 0; i < N; ++i)
-        futures.push_back(Get_future("https://httpbin.org/get"));
+        futures.push_back(http.Get_future("https://httpbin.org/get"));
 
-    // Collect all results — each request was queued to HttpThread
+    // Collect all results — each request was queued to m_thread
     int okCount = 0;
     for (auto& f : futures) {
         HttpResponse resp = f.get();
@@ -84,9 +84,9 @@ static void Test_MultipleFutures()
 // -----------------------------------------------------------------------------
 // Test 5: Main thread does work while HTTP request is in-flight
 // -----------------------------------------------------------------------------
-static void Test_FutureOverlap()
+static void Test_FutureOverlap(AsyncHttp& http)
 {
-    auto future = Get_future("https://httpbin.org/delay/1");
+    auto future = http.Get_future("https://httpbin.org/delay/1");
 
     // Simulate main-thread work while the HTTP request is processing
     int workDone = 0;
@@ -106,17 +106,15 @@ static void Test_FutureOverlap()
 // -----------------------------------------------------------------------------
 // Main entry point
 // -----------------------------------------------------------------------------
-void Future_UT()
+void Future_UT(AsyncHttp& http)
 {
     std::cout << "Running HTTP Future API Tests..." << std::endl;
 
-    http_init();
-
-    Test_GetFuture_Success();
-    Test_GetFuture_404();
-    Test_PostFuture_Success();
-    Test_MultipleFutures();
-    Test_FutureOverlap();
+    Test_GetFuture_Success(http);
+    Test_GetFuture_404(http);
+    Test_PostFuture_Success(http);
+    Test_MultipleFutures(http);
+    Test_FutureOverlap(http);
 
     std::cout << "HTTP Future API Tests Passed!" << std::endl;
 }
