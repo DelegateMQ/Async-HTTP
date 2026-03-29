@@ -31,6 +31,7 @@
 // ------------------------------------------------------------------------------------------------
 
 #include "DelegateMQ.h"
+#include <curl/curl.h>
 #include <future>
 #include <string>
 #include <chrono>
