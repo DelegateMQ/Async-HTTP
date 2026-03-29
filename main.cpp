@@ -113,7 +113,7 @@ void example2(async::AsyncHttp& http)
 // ---------------------------------------------------------------------------
 static std::atomic<int> workersDone{0};
 
-static void WorkerGetWait(async::AsyncHttp* http, std::string threadName)
+static void WorkerGetWait(std::shared_ptr<async::AsyncHttp> http, std::string threadName)
 {
     async::HttpResponse resp = http->GetWait("https://httpbin.org/get",
                                              std::chrono::seconds(15));
@@ -135,9 +135,10 @@ std::chrono::microseconds example3(async::AsyncHttp& http)
 
     auto start = std::chrono::high_resolution_clock::now();
 
+    auto httpPtr = std::shared_ptr<async::AsyncHttp>(&http, [](async::AsyncHttp*){});
     for (int i = 0; i < WORKER_THREAD_CNT; ++i) {
         auto delegate = MakeDelegate(WorkerGetWait, workerThreads[i]);
-        delegate(&http, workerThreads[i].GetThreadName());
+        delegate(httpPtr, workerThreads[i].GetThreadName());
     }
 
     std::unique_lock<std::mutex> lock(cvMtx);
