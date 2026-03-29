@@ -125,6 +125,7 @@ namespace async {
     private:
         Thread m_thread;
         CURL*  m_curl = nullptr;
+        bool   m_running = false;
 
         static size_t WriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata);
 

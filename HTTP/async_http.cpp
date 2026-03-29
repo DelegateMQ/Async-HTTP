@@ -15,6 +15,31 @@
 
 using namespace dmq;
 
+// ---------------------------------------------------------------------------
+// Reference-counted curl global init/cleanup — safe for multiple AsyncHttp
+// instances in the same process.
+// ---------------------------------------------------------------------------
+static std::mutex  g_curlMutex;
+static int         g_curlRefCount = 0;
+
+static int curl_global_addref()
+{
+    std::lock_guard<std::mutex> lock(g_curlMutex);
+    if (g_curlRefCount == 0) {
+        CURLcode res = curl_global_init(CURL_GLOBAL_DEFAULT);
+        if (res != CURLE_OK) return static_cast<int>(res);
+    }
+    ++g_curlRefCount;
+    return 0;
+}
+
+static void curl_global_release()
+{
+    std::lock_guard<std::mutex> lock(g_curlMutex);
+    if (g_curlRefCount > 0 && --g_curlRefCount == 0)
+        curl_global_cleanup();
+}
+
 namespace async {
 
     // -----------------------------------------------------------------------
@@ -64,7 +89,7 @@ namespace async {
 
     AsyncHttp::~AsyncHttp()
     {
-        if (m_curl || m_thread.GetThreadId() != std::thread::id())
+        if (m_running)
             shutdown();
     }
 
@@ -180,27 +205,29 @@ namespace async {
 
     int AsyncHttp::init()
     {
-        if (m_curl) return 0;  // already initialized
+        if (m_running) return 0;  // already initialized
 
-        CURLcode res = curl_global_init(CURL_GLOBAL_DEFAULT);
-        if (res != CURLE_OK) return static_cast<int>(res);
+        int res = curl_global_addref();
+        if (res != 0) return res;
 
         m_curl = curl_easy_init();
         if (!m_curl) return -1;
 
         m_thread.CreateThread();
+        m_running = true;
         return 0;
     }
 
     int AsyncHttp::shutdown(dmq::Duration timeout)
     {
-        if (m_thread.GetThreadId() != std::thread::id()) {
+        if (m_running) {
             auto fn = std::function<void()>([this]() { HttpCleanup(); });
             auto delegate = MakeDelegate(fn, m_thread, timeout);
             delegate.AsyncInvoke();
             m_thread.ExitThread();
+            m_running = false;
         }
-        curl_global_cleanup();
+        curl_global_release();
         return 0;
     }
 
