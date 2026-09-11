@@ -5,8 +5,11 @@
 // David Lafreniere
 
 #include "xallocator.h"
+#include "delegate/DelegateOpt.h"
 #include <memory>    // For std::allocator and std::allocator_traits
 #include <utility>   // For std::forward
+
+namespace dmq {
 
 // Forward declaration for stl_allocator<void>
 template <typename T>
@@ -48,13 +51,15 @@ public:
 	struct rebind { typedef stl_allocator<U> other; };
 
 	// Override allocate method to use custom allocation function
-	pointer allocate(size_type n, typename std::allocator_traits<stl_allocator<void>>::const_pointer hint = 0) 
+	pointer allocate(size_type n, typename std::allocator_traits<stl_allocator<void>>::const_pointer /*hint*/ = 0) 
 	{
-		return static_cast<pointer>(xmalloc(n * sizeof(T)));
+		void* p = xmalloc(n * sizeof(T));
+		if (!p) BAD_ALLOC();
+		return static_cast<pointer>(p);
 	}
 
 	// Override deallocate method to use custom deallocation function
-	void deallocate(pointer p, size_type n) 
+	void deallocate(pointer p, size_type /*n*/) 
 	{
 		xfree(p);
 	}
@@ -68,5 +73,7 @@ inline bool operator==(const stl_allocator<T>&, const stl_allocator<U>&) { retur
 
 template <typename T, typename U>
 inline bool operator!=(const stl_allocator<T>&, const stl_allocator<U>&) { return false; }
+
+} // namespace dmq
 
 #endif 

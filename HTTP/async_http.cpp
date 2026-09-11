@@ -47,7 +47,7 @@ namespace async {
     // and returns a std::future for the result. Not part of the public API.
     // -----------------------------------------------------------------------
     template <typename Func>
-    auto AsyncInvokeFuture(Thread& thread, Func func)
+    auto AsyncInvokeFuture(dmq::os::Thread& thread, Func func)
         -> std::future<std::invoke_result_t<Func>>
     {
         using RetType = std::invoke_result_t<Func>;
@@ -119,6 +119,7 @@ namespace async {
         curl_easy_setopt(m_curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(m_curl, CURLOPT_WRITEDATA, &body);
         curl_easy_setopt(m_curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(m_curl, CURLOPT_TIMEOUT, 10L);
 
         CURLcode res = curl_easy_perform(m_curl);
         if (res != CURLE_OK) {
@@ -153,6 +154,7 @@ namespace async {
         curl_easy_setopt(m_curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(m_curl, CURLOPT_WRITEDATA, &respBody);
         curl_easy_setopt(m_curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(m_curl, CURLOPT_TIMEOUT, 10L);
 
         CURLcode res = curl_easy_perform(m_curl);
         curl_slist_free_all(headers);
@@ -198,7 +200,7 @@ namespace async {
     // Public API implementation
     // -----------------------------------------------------------------------
 
-    Thread* AsyncHttp::get_thread()
+    dmq::os::Thread* AsyncHttp::get_thread()
     {
         return &m_thread;
     }

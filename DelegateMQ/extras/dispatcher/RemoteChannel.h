@@ -14,7 +14,7 @@
 ///   Dispatcher dispatcher;
 ///   dispatcher.SetTransport(&transport);
 ///   Serializer<void(int)> serializer;
-///   xostringstream stream(std::ios::in | std::ios::out | std::ios::binary);
+///   dmq::xostringstream stream(std::ios::in | std::ios::out | std::ios::binary);
 ///
 ///   DelegateFreeRemote<void(int)> remote(REMOTE_ID);
 ///   remote.SetSerializer(&serializer);
@@ -39,7 +39,8 @@
 
 #include "Dispatcher.h"
 #include "delegate/DelegateRemote.h"
-#include "port/transport/ITransport.h"
+#include "delegate/Signal.h"
+#include "port/transport/common/ITransport.h"
 
 namespace dmq {
 
@@ -53,16 +54,21 @@ class RemoteChannel; // Not defined
 /// signature. It owns the `Dispatcher`, the serialization stream, and the internal
 /// `DelegateFunctionRemote` that handles both sending and receiving.
 ///
-/// **Usage pattern (preferred):**
+/// **Receive-side usage (preferred):**
 /// @code
 ///   // Declare per signature — one channel replaces channel + separate delegate
 ///   std::optional<RemoteChannel<void(AlarmMsg&)>> m_alarmChannel;
 ///
 ///   // In Create():
-///   m_alarmChannel.emplace(GetSendTransport(), m_alarmSer);
+///   m_alarmChannel.emplace(GetRecvTransport(), m_alarmSer);
 ///   m_alarmChannel->Bind(this, &MyClass::OnAlarm, ALARM_ID);
 ///   m_alarmChannel->SetErrorHandler(MakeDelegate(this, &MyClass::OnError));
 ///   RegisterEndpoint(ALARM_ID, m_alarmChannel->GetEndpoint());
+/// @endcode
+///
+/// **Send-side usage — no Bind() required:**
+/// @code
+///   m_alarmChannel.emplace(GetSendTransport(), m_alarmSer, ALARM_ID);
 ///
 ///   // Send (fire-and-forget):
 ///   (*m_alarmChannel)(msg);
@@ -84,15 +90,24 @@ class RemoteChannel; // Not defined
 template <class RetType, class... Args>
 class RemoteChannel<RetType(Args...)>
 {
+    XALLOCATOR
 public:
     /// @brief Construct a RemoteChannel.
+    /// @details A send-only channel needs no `Bind()` — pass the remote ID here and
+    /// invoke the channel directly. The receive side must invoke `Bind()` to attach the
+    /// target function invoked on message arrival (`Bind()` overwrites the ID with the
+    /// same value).
     /// @param[in] transport  The transport used to send serialized data. Caller owns it.
     /// @param[in] serializer The serializer matching the delegate signature. Caller owns it.
-    RemoteChannel(ITransport& transport, ISerializer<RetType(Args...)>& serializer)
-        : m_serializer(&serializer)
-        , m_stream(std::ios::in | std::ios::out | std::ios::binary)
+    /// @param[in] id         The remote delegate identifier shared with the receiver.
+    /// Optional for receive channels where `Bind()` supplies the ID.
+    RemoteChannel(transport::ITransport& transport, dmq::ISerializer<RetType(Args...)>& serializer,
+        DelegateRemoteId id = INVALID_REMOTE_ID)
+        : m_stream(std::ios::in | std::ios::out | std::ios::binary)
+        , m_serializer(&serializer)
     {
         m_dispatcher.SetTransport(&transport);
+        m_delegate.SetRemoteId(id);
         m_delegate.SetDispatcher(&m_dispatcher);
         m_delegate.SetSerializer(m_serializer);
         m_delegate.SetStream(&m_stream);
@@ -138,7 +153,7 @@ public:
     }
 
     /// @brief Bind a raw lambda or functor as the receive-side handler.
-    template <typename F, typename = std::enable_if_t<trait::is_callable<F>::value>>
+    template <typename F, typename = std::enable_if_t<dmq::trait::is_callable<F>::value>>
     void Bind(F&& func, DelegateRemoteId id) {
         m_delegate.Bind(std::forward<F>(func), id);
         ReconnectDelegate();
@@ -146,7 +161,10 @@ public:
 
     /// @brief Invoke the channel (fire-and-forget send).
     /// @pre Bind() must have been called first.
-    void operator()(Args... args) { m_delegate(std::forward<Args>(args)...); }
+    void operator()(Args... args) {
+        dmq::LockGuard<dmq::Mutex> lock(m_sendMutex);
+        m_delegate(std::forward<Args>(args)...);
+    }
 
     /// @brief Register an error handler delegate.
     template<class Handler>
@@ -164,22 +182,45 @@ public:
     /// @brief The error status of the most recent invocation.
     DelegateError GetError() noexcept { return m_delegate.GetError(); }
 
+    /// @brief The sequence number assigned to the most recent send.
+    uint16_t GetLastSeqNum() const noexcept { return m_delegate.GetLastSeqNum(); }
+
     /// @brief Returns the internal delegate as an IRemoteInvoker* for RegisterEndpoint().
     IRemoteInvoker* GetEndpoint() noexcept { return &m_delegate; }
 
-    // -----------------------------------------------------------------------
-    // Internal accessors — used by the MakeDelegate free-function overloads
-    // defined below. Not intended for direct use by application code.
-    // -----------------------------------------------------------------------
+private:
+    template <class R, class... A>
+    friend auto MakeDelegate(R(*)(A...), DelegateRemoteId, RemoteChannel<R(A...)>&);
+
+    template <class C, class R, class... A>
+    friend auto MakeDelegate(C*, R(C::*)(A...), DelegateRemoteId, RemoteChannel<R(A...)>&);
+
+    template <class C, class R, class... A>
+    friend auto MakeDelegate(C*, R(C::*)(A...) const, DelegateRemoteId, RemoteChannel<R(A...)>&);
+
+    template <class C, class R, class... A>
+    friend auto MakeDelegate(const C*, R(C::*)(A...) const, DelegateRemoteId, RemoteChannel<R(A...)>&);
+
+    template <class C, class R, class... A>
+    friend auto MakeDelegate(std::shared_ptr<C>, R(C::*)(A...), DelegateRemoteId, RemoteChannel<R(A...)>&);
+
+    template <class C, class R, class... A>
+    friend auto MakeDelegate(std::shared_ptr<C>, R(C::*)(A...) const, DelegateRemoteId, RemoteChannel<R(A...)>&);
+
+    template <class R, class... A>
+    friend auto MakeDelegate(std::function<R(A...)>, DelegateRemoteId, RemoteChannel<R(A...)>&);
+
+    template <typename F_, typename Sig_, typename>
+    friend auto MakeDelegate(F_&&, DelegateRemoteId, RemoteChannel<Sig_>&);
 
     /// @internal Used by MakeDelegate overloads. Prefer Bind() in application code.
-    IDispatcher* GetDispatcher() noexcept { return &m_dispatcher; }
+    dmq::IDispatcher* GetDispatcher() noexcept { return &m_dispatcher; }
 
     /// @internal Used by MakeDelegate overloads. Prefer Bind() in application code.
-    ISerializer<RetType(Args...)>* GetSerializer() noexcept { return m_serializer; }
+    dmq::ISerializer<RetType(Args...)>* GetSerializer() noexcept { return m_serializer; }
 
     /// @internal Used by MakeDelegate overloads. Prefer Bind() in application code.
-    xostringstream& GetStream() noexcept { return m_stream; }
+    dmq::xostringstream& GetStream() noexcept { return m_stream; }
 
 private:
     void ReconnectDelegate() {
@@ -188,17 +229,18 @@ private:
         m_delegate.SetStream(&m_stream);
     }
 
+    dmq::Mutex m_sendMutex;
     Dispatcher m_dispatcher;
-    xostringstream m_stream;
-    ISerializer<RetType(Args...)>* m_serializer = nullptr;
+    dmq::xostringstream m_stream;
+    dmq::ISerializer<RetType(Args...)>* m_serializer = nullptr;
     DelegateFunctionRemote<RetType(Args...)> m_delegate;
 };
 
 /// @brief C++17 deduction guide — lets the compiler deduce `Sig` from the serializer type.
-/// @details Enables `RemoteChannel channel(transport, serializer)` without an explicit
-/// template argument.
+/// @details Enables `RemoteChannel channel(transport, serializer)` and
+/// `RemoteChannel channel(transport, serializer, id)` without an explicit template argument.
 template <class RetType, class... Args>
-RemoteChannel(ITransport&, ISerializer<RetType(Args...)>&) -> RemoteChannel<RetType(Args...)>;
+RemoteChannel(transport::ITransport&, dmq::ISerializer<RetType(Args...)>&, DelegateRemoteId = INVALID_REMOTE_ID) -> RemoteChannel<RetType(Args...)>;
 
 // ---- MakeDelegate overloads for RemoteChannel ----------------------------------
 //
@@ -317,7 +359,7 @@ auto MakeDelegate(std::function<RetType(Args...)> func, DelegateRemoteId id, Rem
 }
 
 /// @brief Creates a remote delegate bound to a raw lambda or functor via a RemoteChannel.
-template <typename F, typename Sig, typename = std::enable_if_t<trait::is_callable<F>::value>>
+template <typename F, typename Sig, typename = std::enable_if_t<dmq::trait::is_callable<F>::value>>
 auto MakeDelegate(F&& func, DelegateRemoteId id, RemoteChannel<Sig>& channel)
 {
     DelegateFunctionRemote<Sig> d(std::forward<F>(func), id);

@@ -52,7 +52,7 @@ static void Test_Get_SyncCallback(AsyncHttp& http)
 // -----------------------------------------------------------------------------
 static void Test_Get_AsyncCallback(AsyncHttp& http)
 {
-    Thread callerThread("CallbackCallerThread");
+    dmq::os::Thread callerThread("CallbackCallerThread");
     callerThread.CreateThread();
 
     std::atomic<bool> fired{false};

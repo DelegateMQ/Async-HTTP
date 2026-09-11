@@ -11,7 +11,7 @@ using namespace async;
 // -----------------------------------------------------------------------------
 static void Test_InitAndThread(AsyncHttp& http)
 {
-    Thread* thread = http.get_thread();
+    dmq::os::Thread* thread = http.get_thread();
     ASSERT_TRUE(thread != nullptr);
     ASSERT_TRUE(!thread->GetThreadName().empty());
     ASSERT_TRUE(thread->GetThreadId() != std::thread::id());
@@ -23,7 +23,7 @@ static void Test_InitAndThread(AsyncHttp& http)
 static void Test_DoubleInit(AsyncHttp& http)
 {
     http.init();  // already initialized — should be a no-op
-    Thread* thread = http.get_thread();
+    dmq::os::Thread* thread = http.get_thread();
     ASSERT_TRUE(thread != nullptr);
     ASSERT_TRUE(thread->GetThreadId() != std::thread::id());
 }

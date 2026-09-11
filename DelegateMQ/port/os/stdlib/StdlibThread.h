@@ -1,0 +1,222 @@
+#ifndef _THREAD_STD_H
+#define _THREAD_STD_H
+
+/// @file StdlibThread.h
+/// @see https://github.com/DelegateMQ/DelegateMQ
+/// David Lafreniere, 2025.
+///
+/// @brief Standard C++ implementation of the DelegateMQ IThread interface.
+///
+/// @details
+/// This class provides a cross-platform implementation of the `IThread` interface using 
+/// standard C++11 primitives (`std::thread`, `std::mutex`, `std::condition_variable`). 
+/// It creates a dedicated worker thread with an event loop capable of processing 
+/// asynchronous delegates and system messages.
+///
+/// **Key Features:**
+/// * **Priority Queue:** Uses `std::priority_queue` to ensure high-priority delegate 
+///   messages (e.g., system signals) are processed before lower-priority ones.
+/// * **Queue Full Policy:** Configurable `FullPolicy` (DROP or TIMEOUT) when `maxQueueSize > 0`.
+///   TIMEOUT waits up to `dispatchTimeout` for the consumer before logging and dropping;
+///   DROP silently discards immediately. FAULT (the default) triggers a system fault.
+/// * **Watchdog Integration:** Includes a built-in heartbeat mechanism. If the thread loop 
+///   stalls (deadlock or infinite loop), the watchdog timer detects the failure.
+/// * **Synchronized Start:** Uses `std::promise` and `std::future` to ensure the thread 
+///   is fully initialized and running before `CreateThread()` returns.
+/// * **Debug Support:** Sets the native thread name (on supported OSs like Windows) to 
+///   aid debugging in IDEs.
+
+#include "delegate/IThread.h"
+#include "./extras/util/Timer.h"
+#include "port/os/common/ThreadMsg.h"
+#include <thread>
+#include <deque>
+#include <atomic>
+#include <condition_variable>
+#include <future>
+#include <optional>
+
+namespace dmq::os {
+
+/// @brief Policy applied when the thread message queue is full. See dmq::FullPolicy
+/// in DelegateOpt.h for the canonical definition, shared by every dmq::os::Thread port.
+using FullPolicy = dmq::FullPolicy;
+
+/// @brief Cross-platform thread for any system supporting C++11 std::thread (e.g. Windows, Linux).
+/// @details The StdlibThread class creates a worker thread capable of dispatching and
+/// invoking asynchronous delegates.
+class StdlibThread : public dmq::IThread
+{
+    XALLOCATOR
+public:
+#if defined(DMQ_DATABUS_TOOLS)
+    /// @brief Statistics captured for thread monitoring.
+    struct ThreadStats {
+        dmq::xstring cpu_name;
+        dmq::xstring thread_name;
+        size_t queue_depth;           // Current depth
+        size_t queue_depth_max_window;// Max depth since last snapshot
+        size_t queue_depth_max_all;   // All-time max depth
+        size_t queue_size_limit;      // Max allowed
+        float latency_avg_ms;        // Avg wait in window
+        float latency_max_window_ms; // Max wait since last snapshot
+        float latency_max_all_ms;    // All-time max wait
+        float invoke_avg_ms;         // Avg execution in window
+        float invoke_max_window_ms;  // Max execution since last snapshot
+        float invoke_max_all_ms;     // All-time max execution
+        uint64_t dispatch_count;      // Total dispatches (all-time)
+    };
+#endif
+
+    /// Constructor
+    /// @param threadName The name of the thread for debugging.
+    /// @param maxQueueSize The maximum number of messages allowed in the queue.
+    ///                     0 means unlimited (no back pressure).
+    /// @param fullPolicy When the queue is full: FAULT (default), DROP, or TIMEOUT.
+    ///                   Only meaningful when maxQueueSize > 0.
+    /// @param dispatchTimeout Duration to wait before giving up when policy is TIMEOUT.
+    /// @param cpuName Optional CPU/Core name grouping for monitoring tools.
+    StdlibThread(const char* threadName, size_t maxQueueSize = 0, FullPolicy fullPolicy = FullPolicy::FAULT,
+           dmq::Duration dispatchTimeout = dmq::DEFAULT_DISPATCH_TIMEOUT, const char* cpuName = "");
+    StdlibThread(const std::string& threadName, size_t maxQueueSize = 0, FullPolicy fullPolicy = FullPolicy::FAULT,
+           dmq::Duration dispatchTimeout = dmq::DEFAULT_DISPATCH_TIMEOUT, const std::string& cpuName = "")
+        : StdlibThread(threadName.c_str(), maxQueueSize, fullPolicy, dispatchTimeout, cpuName.c_str()) {}
+
+    /// Destructor
+    ~StdlibThread();
+
+    /// Called once to create the worker thread. If watchdogTimeout value 
+    /// provided, the maximum watchdog interval is used. Otherwise no watchdog.
+    /// @param[in] watchdogTimeout - optional watchdog timeout.
+    /// @return TRUE if thread is created. FALSE otherwise. 
+    bool CreateThread(std::optional<dmq::Duration> watchdogTimeout = std::nullopt);
+
+    /// Called once at program exit to shut down the worker thread
+    void ExitThread();
+
+    /// Get the ID of this thread instance
+    std::thread::id GetThreadId();
+
+    /// Get the ID of the currently executing thread
+    static std::thread::id GetCurrentThreadId();
+
+    /// Returns true if the calling thread is this thread
+    virtual bool IsCurrentThread() override;
+
+    /// Get thread name
+    dmq::xstring GetThreadName() { return THREAD_NAME; }
+
+    /// Get size of thread message queue.
+    size_t GetQueueSize();
+
+    /// Sleep for a duration.
+    /// @param[in] timeout - the duration to sleep.
+    static void Sleep(dmq::Duration timeout);
+
+    /// Dispatch and invoke a delegate target on the destination thread.
+    /// @param[in] msg - Delegate message containing target function 
+    /// arguments.
+    virtual bool DispatchDelegate(std::shared_ptr<dmq::DelegateMsg> msg) override;
+
+    /// @brief Manually update the watchdog alive timestamp.
+    /// @details The Process() loop refreshes the timestamp automatically on every iteration.
+    /// Call this from inside long-running message handlers to prevent a false watchdog
+    /// alarm when a handler legitimately takes longer than watchdogTimeout.
+    void ThreadCheck();
+
+    /// @brief Static method to check all registered threads for watchdog expiration.
+    static void WatchdogCheckAll();
+
+#if defined(DMQ_DATABUS_TOOLS)
+    /// @brief Capture and reset windowed statistics.
+    ThreadStats SnapshotStats();
+#endif
+
+private:
+    StdlibThread(const StdlibThread&) = delete;
+    StdlibThread& operator=(const StdlibThread&) = delete;
+
+    /// Entry point for the thread
+    void Process();
+
+    void SetThreadName(std::thread::native_handle_type handle, const dmq::xstring& name);
+
+    /// Check watchdog is expired. This function is called by the thread 
+    /// the calls Timer::ProcessTimers(). This function is thread-safe.
+    /// In a real-time OS, Timer::ProcessTimers() typically is called by the highest
+    /// priority task in the system.
+    void WatchdogCheck();
+
+    /// @brief Returns the head of the watchdog linked list.
+    static StdlibThread*& GetWatchdogHead();
+
+    /// @brief Returns the recursive mutex for protecting the watchdog list.
+    static dmq::RecursiveMutex& GetWatchdogLock();
+
+    std::optional<std::thread> m_thread;
+    std::atomic<bool> m_exit;
+
+#ifdef DMQ_ALLOCATOR
+    std::deque<std::shared_ptr<ThreadMsg>, stl_allocator<std::shared_ptr<ThreadMsg>>> m_highQueue;
+    std::deque<std::shared_ptr<ThreadMsg>, stl_allocator<std::shared_ptr<ThreadMsg>>> m_normalQueue;
+#else
+    std::deque<std::shared_ptr<ThreadMsg>> m_highQueue;
+    std::deque<std::shared_ptr<ThreadMsg>> m_normalQueue;
+#endif
+    std::mutex m_mutex;
+    std::condition_variable m_cv;
+
+    // Condition variable to wake up blocked producers when space is available
+    std::condition_variable m_cvNotFull;
+
+    const dmq::xstring THREAD_NAME;
+    const dmq::xstring CPU_NAME;
+
+    // Max queue size (0 = unlimited)
+    const size_t MAX_QUEUE_SIZE;
+
+    // Policy when queue is full
+    const FullPolicy FULL_POLICY;
+
+    // Timeout duration for TIMEOUT policy
+    const dmq::Duration m_dispatchTimeout;
+
+    // Promise and future to synchronize thread start (constructed lazily in CreateThread)
+    std::optional<std::promise<void>> m_threadStartPromise;
+    std::optional<std::future<void>> m_threadStartFuture;
+
+    // Watchdog related members
+    std::atomic<dmq::TimePoint> m_lastAliveTime;
+    std::atomic<dmq::Duration> m_watchdogTimeout;
+    StdlibThread* m_watchdogNext = nullptr;
+
+#if defined(DMQ_DATABUS_TOOLS)
+    // Separate mutex for statistics to reduce contention on m_mutex
+    std::mutex m_statsMutex;
+
+    // Monitoring statistics members
+    size_t m_queueDepthMaxWindow = 0;
+    size_t m_queueDepthMaxAll = 0;
+    
+    dmq::Duration m_latencyTotalWindow = dmq::Duration(0);
+    uint32_t m_latencyCountWindow = 0;
+    dmq::Duration m_latencyMaxWindow = dmq::Duration(0);
+    dmq::Duration m_latencyMaxAll = dmq::Duration(0);
+
+    dmq::Duration m_invokeTotalWindow = dmq::Duration(0);
+    uint32_t m_invokeCountWindow = 0;
+    dmq::Duration m_invokeMaxWindow = dmq::Duration(0);
+    dmq::Duration m_invokeMaxAll = dmq::Duration(0);
+
+    uint64_t m_dispatchCountAll = 0;
+#endif
+};
+
+/// @brief Backward-compatible name: existing code referencing dmq::os::Thread
+/// keeps compiling unchanged against the stdlib port.
+using Thread = StdlibThread;
+
+} // namespace dmq::os
+
+
+#endif

@@ -45,12 +45,13 @@
 #include <stdint.h>
 #include <string.h>
 #include <algorithm>
-#include <cassert>
+#include "extras/util/Fault.h"
 #include <limits>
 #include <type_traits>
 #include <typeinfo>
 #include <iostream>
 #include <memory>
+#include <array>
 #include <vector>
 #include <list>
 #include <map>
@@ -162,6 +163,8 @@ public:
     class I
     {
     public:
+        virtual ~I() = default;
+
         /// Inheriting class implements the write function. Write each
         /// class member to the ostream. Write in the same order as read().
         /// Each level within the hierarchy must implement. Ensure base
@@ -268,10 +271,31 @@ public:
 
                 read(is, size, false);
 
+                std::streampos targetStopPos = startPos + std::streampos(size);
+
+                // Bounds check: ensure size does not exceed stream EOF
+                std::streampos dataPos = is.tellg();
+                is.seekg(0, std::ios::end);
+                std::streampos endPosStream = is.tellg();
+                is.seekg(dataPos);
+
+                if (targetStopPos > endPosStream) {
+                    raiseError(ParsingError::INVALID_INPUT, __LINE__, __FILE__);
+                    is.setstate(std::ios::failbit);
+                    return is;
+                }
+
+                // Bounds check: ensure size does not exceed parent object's bounds
+                if (stopParsePosIdx > 0 && targetStopPos > stopParsePosStack[stopParsePosIdx - 1]) {
+                    raiseError(ParsingError::INVALID_INPUT, __LINE__, __FILE__);
+                    is.setstate(std::ios::failbit);
+                    return is;
+                }
+
                 parseStatus(typeid(*t_), size);
 
                 // Save the stop parsing position to prevent parsing overrun
-                push_stop_parse_pos(startPos + std::streampos(size));
+                push_stop_parse_pos(targetStopPos);
 
                 t_->read(*this, is);
 
@@ -300,7 +324,8 @@ public:
     /// @param[in] is - the input stream
     /// @param[in] s - the string to read
     /// @return The input stream
-    std::istream& read(std::istream& is, std::string& s)
+    template <typename Traits, typename Alloc>
+    std::istream& read(std::istream& is, std::basic_string<char, Traits, Alloc>& s)
     {
         if (check_stop_parse(is))
             return is;
@@ -324,7 +349,8 @@ public:
     /// @param[in] is - the input stream
     /// @param[in] s - the string to read
     /// @return The input stream
-    std::istream& read(std::istream& is, std::wstring& s)
+    template <typename Traits, typename Alloc>
+    std::istream& read(std::istream& is, std::basic_string<wchar_t, Traits, Alloc>& s)
     {
         if (check_stop_parse(is))
             return is;
@@ -443,7 +469,13 @@ public:
                 // Backfill the object size into the stream (requires seekable stream)
                 std::streampos currentPos = os.tellp();
                 os.seekp(elementSizePos);
-                elementSize = static_cast<uint16_t>(currentPos - elementSizePos);
+                auto sizeDiff = currentPos - elementSizePos;
+                if (sizeDiff > UINT16_MAX) {
+                    raiseError(ParsingError::INVALID_INPUT, __LINE__, __FILE__);
+                    os.setstate(std::ios::failbit);
+                    return os;
+                }
+                elementSize = static_cast<uint16_t>(sizeDiff);
                 write(os, elementSize, false);
                 os.seekp(currentPos);
             }
@@ -456,9 +488,14 @@ public:
     /// @param[in] os - the output stream
     /// @param[in] s - the string to write
     /// @return The output stream
-    std::ostream& write(std::ostream& os, const std::string& s)
+    template <typename Traits, typename Alloc>
+    std::ostream& write(std::ostream& os, const std::basic_string<char, Traits, Alloc>& s)
     {
-        assert(s.size() <= (std::numeric_limits<uint16_t>::max)());
+        if (s.size() > MAX_STRING_SIZE) {
+            raiseError(ParsingError::STRING_TOO_LONG, __LINE__, __FILE__);
+            os.setstate(std::ios::failbit);
+            return os;
+        }
         uint16_t size = static_cast<uint16_t>(s.size());
         write_type(os, Type::STRING);
         write(os, size, false);
@@ -473,18 +510,24 @@ public:
     /// @param[in] os - the output stream
     /// @param[in] s - the string to write
     /// @return The output stream
-    std::ostream& write(std::ostream& os, std::string& s)
+    template <typename Traits, typename Alloc>
+    std::ostream& write(std::ostream& os, std::basic_string<char, Traits, Alloc>& s)
     {
-        return write(os, static_cast<const std::string&>(s));
+        return write(os, static_cast<const std::basic_string<char, Traits, Alloc>&>(s));
     }
 
     /// Write a const std::wstring to a stream.
     /// @param[in] os - the output stream
     /// @param[in] s - the string to write
     /// @return The output stream
-    std::ostream& write(std::ostream& os, const std::wstring& s)
+    template <typename Traits, typename Alloc>
+    std::ostream& write(std::ostream& os, const std::basic_string<wchar_t, Traits, Alloc>& s)
     {
-        assert(s.size() <= (std::numeric_limits<uint16_t>::max)());
+        if (s.size() > MAX_STRING_SIZE) {
+            raiseError(ParsingError::STRING_TOO_LONG, __LINE__, __FILE__);
+            os.setstate(std::ios::failbit);
+            return os;
+        }
         uint16_t size = static_cast<uint16_t>(s.size());
         write_type(os, Type::WSTRING);
         write(os, size, false);
@@ -504,9 +547,10 @@ public:
     /// @param[in] os - the output stream
     /// @param[in] s - the string to write
     /// @return The output stream
-    std::ostream& write(std::ostream& os, std::wstring& s)
+    template <typename Traits, typename Alloc>
+    std::ostream& write(std::ostream& os, std::basic_string<wchar_t, Traits, Alloc>& s)
     {
-        return write(os, static_cast<const std::wstring&>(s));
+        return write(os, static_cast<const std::basic_string<wchar_t, Traits, Alloc>&>(s));
     }
 
     /// Write a character string to a stream.
@@ -547,7 +591,11 @@ public:
     /// @return The output stream
     std::ostream& write(std::ostream& os, std::vector<bool>& container)
     {
-        assert(container.size() <= (std::numeric_limits<uint16_t>::max)());
+        if (container.size() > MAX_CONTAINER_SIZE) {
+            raiseError(ParsingError::CONTAINER_TOO_MANY, __LINE__, __FILE__);
+            os.setstate(std::ios::failbit);
+            return os;
+        }
         uint16_t size = static_cast<uint16_t>(container.size());
         write_type(os, Type::VECTOR);
         write(os, size, false);
@@ -578,7 +626,51 @@ public:
         if (check_stop_parse(is))
             return is;
 
+        // If C++17 or higher
+#if defined(_MSVC_LANG) && _MSVC_LANG >= 201703L || __cplusplus >= 201703L
+        // Check if T is a user-defined class
+        if constexpr (std::is_class<T>::value)
+        {
+            // C-style cast required: T may be const-qualified (e.g. const AlarmMsg)
+            // when called from a const context, and neither static_cast nor
+            // reinterpret_cast can strip const. A C-style cast combines const_cast
+            // with the pointer conversion in one step. The static_assert above
+            // guarantees T derives from I whenever this branch is executed.
+            read(is, (serialize::I*)(&t_));
+            return is;
+        }
+        else
+        {
+            // If T is not a class, handle built-in data types
+            if constexpr (std::is_pointer<T>::value == false)
+            {
+                if (readPrependedType)
+                {
+                    if (!read_type(is, Type::LITERAL))
+                    {
+                        return is;
+                    }
+                }
+
+                if (readPrependedType)
+                    parseStatus(typeid(t_), sizeof(t_));
+                read_internal(is, reinterpret_cast<char*>(&t_), sizeof(t_));
+                return is;
+            }
+            else
+            {
+                // Can't read pointers to built-in types
+                raiseError(ParsingError::INVALID_INPUT, __LINE__, __FILE__);
+                is.setstate(std::ios::failbit);
+                return is;
+            }
+        }
+#else
         // Is T a built-in data type (e.g. float, int, ...)?
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 6326)
+#endif
         if (std::is_class<T>::value == false)
         {
             // Is T is not a pointer type
@@ -615,6 +707,10 @@ public:
             read(is, (serialize::I*)(&t_));
             return is;
         }
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+#endif
     }
 
     /// Write an object to a stream.
@@ -652,7 +748,7 @@ public:
         else
         {
             // If T is not a class, handle built-in data types
-            if (std::is_pointer<T>::value == false)
+            if constexpr (std::is_pointer<T>::value == false)
             {
                 if (prependType)
                 {
@@ -670,6 +766,10 @@ public:
         }
 #else
         // Is T type a built-in data type (e.g. float, int, ...)?
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 6326)
+#endif
         if (std::is_class<T>::value == false)
         {
             // Is T is not a pointer type
@@ -698,6 +798,9 @@ public:
             // is_class<T> is true, making the cast safe at runtime.
             return write(os, (serialize::I*)(&t_));
         }
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 #endif
     }
 
@@ -711,7 +814,11 @@ public:
     {
         static_assert(!serialize_traits::is_shared_ptr<T>::value, "Type T must not be a shared_ptr type");
 
-        assert(container.size() <= (std::numeric_limits<uint16_t>::max)());
+        if (container.size() > MAX_CONTAINER_SIZE) {
+            raiseError(ParsingError::CONTAINER_TOO_MANY, __LINE__, __FILE__);
+            os.setstate(std::ios::failbit);
+            return os;
+        }
         uint16_t size = static_cast<uint16_t>(container.size());
         write_type(os, Type::VECTOR);
         write(os, size, false);
@@ -767,7 +874,11 @@ public:
     {
         static_assert(std::is_base_of<serialize::I, T>::value, "Type T must be derived from serialize::I");
 
-        assert(container.size() <= (std::numeric_limits<uint16_t>::max)());
+        if (container.size() > MAX_CONTAINER_SIZE) {
+            raiseError(ParsingError::CONTAINER_TOO_MANY, __LINE__, __FILE__);
+            os.setstate(std::ios::failbit);
+            return os;
+        }
         uint16_t size = static_cast<uint16_t>(container.size());
         write_type(os, Type::VECTOR);
         write(os, size, false);
@@ -848,7 +959,11 @@ public:
     {
         static_assert(!serialize_traits::is_shared_ptr<V>::value, "Type V must not be a shared_ptr type");
 
-        assert(container.size() <= (std::numeric_limits<uint16_t>::max)());
+        if (container.size() > MAX_CONTAINER_SIZE) {
+            raiseError(ParsingError::CONTAINER_TOO_MANY, __LINE__, __FILE__);
+            os.setstate(std::ios::failbit);
+            return os;
+        }
         uint16_t size = static_cast<uint16_t>(container.size());
         write_type(os, Type::MAP);
         write(os, size, false);
@@ -907,7 +1022,11 @@ public:
     {
         static_assert(std::is_base_of<serialize::I, V>::value, "Type V must be derived from serialize::I");
 
-        assert(container.size() <= (std::numeric_limits<uint16_t>::max)());
+        if (container.size() > MAX_CONTAINER_SIZE) {
+            raiseError(ParsingError::CONTAINER_TOO_MANY, __LINE__, __FILE__);
+            os.setstate(std::ios::failbit);
+            return os;
+        }
         uint16_t size = static_cast<uint16_t>(container.size());
         write_type(os, Type::MAP);
         write(os, size, false);
@@ -990,7 +1109,11 @@ public:
     {
         static_assert(!serialize_traits::is_shared_ptr<T>::value, "Type T must not be a shared_ptr type");
 
-        assert(container.size() <= (std::numeric_limits<uint16_t>::max)());
+        if (container.size() > MAX_CONTAINER_SIZE) {
+            raiseError(ParsingError::CONTAINER_TOO_MANY, __LINE__, __FILE__);
+            os.setstate(std::ios::failbit);
+            return os;
+        }
         uint16_t size = static_cast<uint16_t>(container.size());
         write_type(os, Type::SET);
         write(os, size, false);
@@ -1047,7 +1170,11 @@ public:
     {
         static_assert(std::is_base_of<serialize::I, T>::value, "Type T must be derived from serialize::I");
 
-        assert(container.size() <= (std::numeric_limits<uint16_t>::max)());
+        if (container.size() > MAX_CONTAINER_SIZE) {
+            raiseError(ParsingError::CONTAINER_TOO_MANY, __LINE__, __FILE__);
+            os.setstate(std::ios::failbit);
+            return os;
+        }
         uint16_t size = static_cast<uint16_t>(container.size());
         write_type(os, Type::SET);
         write(os, size, false);
@@ -1125,7 +1252,11 @@ public:
     {
         static_assert(!serialize_traits::is_shared_ptr<T>::value, "Type T must not be a shared_ptr type");
 
-        assert(container.size() <= (std::numeric_limits<uint16_t>::max)());
+        if (container.size() > MAX_CONTAINER_SIZE) {
+            raiseError(ParsingError::CONTAINER_TOO_MANY, __LINE__, __FILE__);
+            os.setstate(std::ios::failbit);
+            return os;
+        }
         uint16_t size = static_cast<uint16_t>(container.size());
         write_type(os, Type::LIST);
         write(os, size, false);
@@ -1182,7 +1313,11 @@ public:
     {
         static_assert(std::is_base_of<serialize::I, T>::value, "Type T must be derived from serialize::I");
 
-        assert(container.size() <= (std::numeric_limits<uint16_t>::max)());
+        if (container.size() > MAX_CONTAINER_SIZE) {
+            raiseError(ParsingError::CONTAINER_TOO_MANY, __LINE__, __FILE__);
+            os.setstate(std::ios::failbit);
+            return os;
+        }
         uint16_t size = static_cast<uint16_t>(container.size());
         write_type(os, Type::LIST);
         write(os, size, false);
@@ -1328,15 +1463,16 @@ private:
     }
 
     // Maximum sizes allowed by parser
-    static const uint16_t MAX_STRING_SIZE = 256;
-    static const uint16_t MAX_CONTAINER_SIZE = 200;
+    static const uint16_t MAX_STRING_SIZE = 1024;
+    static const uint16_t MAX_CONTAINER_SIZE = 64;
 
     // Keep wchar_t serialize size consistent on any platform
     static const size_t WCHAR_SIZE = 2;
 
     // LIFO stack used to track stop-parse positions for versioned object reads.
-    // std::vector gives O(1) push/pop with no per-element heap allocation.
-    std::vector<std::streampos> stopParsePosStack;
+    static const size_t MAX_PARSE_STACK_DEPTH = 5;
+    std::array<std::streampos, MAX_PARSE_STACK_DEPTH> stopParsePosStack;
+    size_t stopParsePosIdx = 0;
 
     ErrorHandler error_handler = nullptr;
     ParsingError lastError = ParsingError::NONE;
@@ -1431,15 +1567,14 @@ private:
 
     void push_stop_parse_pos(std::streampos stopParsePos)
     {
-        stopParsePosStack.push_back(stopParsePos);
+        ASSERT_TRUE(stopParsePosIdx < MAX_PARSE_STACK_DEPTH);
+        stopParsePosStack[stopParsePosIdx++] = stopParsePos;
     }
 
     std::streampos pop_stop_parse_pos()
     {
-        assert(!stopParsePosStack.empty());
-        std::streampos stopParsePos = stopParsePosStack.back();
-        stopParsePosStack.pop_back();
-        return stopParsePos;
+        ASSERT_TRUE(stopParsePosIdx > 0);
+        return stopParsePosStack[--stopParsePosIdx];
     }
 
     bool check_stop_parse(std::istream& is)
@@ -1449,9 +1584,9 @@ private:
             raiseError(ParsingError::END_OF_FILE, __LINE__, __FILE__);
             return true;
         }
-        if (!stopParsePosStack.empty())
+        if (stopParsePosIdx > 0)
         {
-            std::streampos stopParsePos = stopParsePosStack.back();
+            std::streampos stopParsePos = stopParsePosStack[stopParsePosIdx - 1];
             if (is.tellg() >= stopParsePos)
             {
                 return true;

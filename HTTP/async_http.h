@@ -85,7 +85,7 @@ namespace async {
         int shutdown(dmq::Duration timeout = MAX_WAIT);
 
         /// Accessor for the internal worker thread (e.g. to dispatch work directly onto it).
-        Thread* get_thread();
+        dmq::os::Thread* get_thread();
 
         // -------------------------------------------------------------------------
         // Blocking API — caller blocks until response arrives or timeout expires
@@ -123,7 +123,7 @@ namespace async {
                                               const std::string& contentType);
 
     private:
-        Thread m_thread;
+        dmq::os::Thread m_thread;
         CURL*  m_curl = nullptr;
         bool   m_running = false;
 

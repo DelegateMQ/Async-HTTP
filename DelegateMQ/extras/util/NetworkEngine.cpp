@@ -1,12 +1,15 @@
 #include "NetworkEngine.h"
+#include "extras/util/TimerDelegate.h"
 
 // Only compile implementation if a compatible transport is selected
 #if defined(DMQ_TRANSPORT_ZEROMQ) || defined(DMQ_TRANSPORT_WIN32_UDP) || defined(DMQ_TRANSPORT_LINUX_UDP) || defined(DMQ_TRANSPORT_STM32_UART) || defined(DMQ_TRANSPORT_SERIAL_PORT)
 
+namespace dmq::util {
+
 using namespace dmq;
+using namespace dmq::transport;
 using namespace std;
 
-const std::chrono::milliseconds NetworkEngine::SEND_TIMEOUT(100);
 const std::chrono::milliseconds NetworkEngine::RECV_TIMEOUT(2000);
 
 // [STM32-FreeRTOS] Define Static Stack for Network Thread
@@ -16,10 +19,12 @@ const std::chrono::milliseconds NetworkEngine::RECV_TIMEOUT(2000);
 #endif
 
 NetworkEngine::NetworkEngine()
-    : m_thread("NetworkEngine"),
+    : m_thread("NetworkEngine", 25, dmq::os::FullPolicy::DROP),
     m_transportMonitor(RECV_TIMEOUT),
     m_recvThread("NetworkRecv")
-#if defined(DMQ_TRANSPORT_WIN32_UDP) || defined(DMQ_TRANSPORT_LINUX_UDP)
+#if defined(DMQ_TRANSPORT_ZEROMQ)
+    // No extra init needed for ZeroMQ
+#elif defined(DMQ_TRANSPORT_WIN32_UDP) || defined(DMQ_TRANSPORT_LINUX_UDP)
     , m_retryMonitor(m_sendTransport, m_transportMonitor)
     , m_reliableTransport(m_sendTransport, m_retryMonitor)
 #elif defined(DMQ_TRANSPORT_STM32_UART)
@@ -61,7 +66,7 @@ NetworkEngine::~NetworkEngine()
 int NetworkEngine::Initialize(const std::string& sendAddr, const std::string& recvAddr, bool isServer)
 {
     if (!m_thread.IsCurrentThread())
-        return MakeDelegate(this, &NetworkEngine::Initialize, m_thread, WAIT_INFINITE)(sendAddr, recvAddr, isServer);
+        return dmq::MakeDelegate(this, &NetworkEngine::Initialize, m_thread, dmq::WAIT_INFINITE)(sendAddr, recvAddr, isServer);
 
     int err = 0;
     auto type = isServer ? ZeroMqTransport::Type::PAIR_SERVER : ZeroMqTransport::Type::PAIR_CLIENT;
@@ -91,12 +96,17 @@ int NetworkEngine::Initialize(const std::string& sendAddr, const std::string& re
 int NetworkEngine::Initialize(const std::string& sendIp, int sendPort, const std::string& recvIp, int recvPort)
 {
     if (!m_thread.IsCurrentThread())
-        return MakeDelegate(this, &NetworkEngine::Initialize, m_thread, WAIT_INFINITE)(sendIp, sendPort, recvIp, recvPort);
+        return dmq::MakeDelegate(this, &NetworkEngine::Initialize, m_thread, dmq::WAIT_INFINITE)(sendIp, sendPort, recvIp, recvPort);
 
     int err = 0;
     // UDP typically uses PUB/SUB or generic send/recv
-    err += m_sendTransport.Create(UdpTransport::Type::PUB, sendIp.c_str(), sendPort);
-    err += m_recvTransport.Create(UdpTransport::Type::SUB, recvIp.c_str(), recvPort);
+#if defined(DMQ_TRANSPORT_WIN32_UDP)
+    err += m_sendTransport.Create(Win32UdpTransport::Type::PUB, sendIp.c_str(), static_cast<USHORT>(sendPort));
+    err += m_recvTransport.Create(Win32UdpTransport::Type::SUB, recvIp.c_str(), static_cast<USHORT>(recvPort));
+#elif defined(DMQ_TRANSPORT_LINUX_UDP)
+    err += m_sendTransport.Create(LinuxUdpTransport::Type::PUB, sendIp.c_str(), static_cast<uint16_t>(sendPort));
+    err += m_recvTransport.Create(LinuxUdpTransport::Type::SUB, recvIp.c_str(), static_cast<uint16_t>(recvPort));
+#endif
 
     m_statusConn = m_transportMonitor.OnSendStatus.Connect(dmq::MakeDelegate(this, &NetworkEngine::InternalStatusHandler));
 
@@ -120,7 +130,7 @@ int NetworkEngine::Initialize(const std::string& sendIp, int sendPort, const std
 int NetworkEngine::Initialize(UART_HandleTypeDef* huart)
 {
     if (!m_thread.IsCurrentThread())
-        return MakeDelegate(this, &NetworkEngine::Initialize, m_thread, WAIT_INFINITE)(huart);
+        return dmq::MakeDelegate(this, &NetworkEngine::Initialize, m_thread, dmq::WAIT_INFINITE)(huart);
 
     int err = 0;
 
@@ -148,7 +158,7 @@ int NetworkEngine::Initialize(UART_HandleTypeDef* huart)
 int NetworkEngine::Initialize(const std::string& portName, int baudRate)
 {
     if (!m_thread.IsCurrentThread())
-        return MakeDelegate(this, &NetworkEngine::Initialize, m_thread, WAIT_INFINITE)(portName, baudRate);
+        return dmq::MakeDelegate(this, &NetworkEngine::Initialize, m_thread, dmq::WAIT_INFINITE)(portName, baudRate);
 
     int err = 0;
 
@@ -176,7 +186,7 @@ int NetworkEngine::Initialize(const std::string& portName, int baudRate)
 void NetworkEngine::Start()
 {
     if (!m_thread.IsCurrentThread())
-        return MakeDelegate(this, &NetworkEngine::Start, m_thread)();
+        return dmq::MakeDelegate(this, &NetworkEngine::Start, m_thread)();
 
     if (!m_recvThreadCreated)
     {
@@ -184,25 +194,32 @@ void NetworkEngine::Start()
         m_recvThread.CreateThread();
 
         // Post the "RecvThread" loop to run on this new thread.
-        MakeDelegate(this, &NetworkEngine::RecvThread, m_recvThread).AsyncInvoke();
+        dmq::MakeDelegate(this, &NetworkEngine::RecvThread, m_recvThread).AsyncInvoke();
     }
 
-    m_timeoutTimerConn = m_timeoutTimer.OnExpired.Connect(MakeDelegate(this, &NetworkEngine::Timeout, m_thread));
+    m_timeoutTimerConn = m_timeoutTimer.OnExpired.Connect(dmq::util::MakeTimerDelegate(this, &NetworkEngine::Timeout, m_thread));
     m_timeoutTimer.Start(std::chrono::milliseconds(100));
 }
 
 void NetworkEngine::Stop()
 {
     if (!m_thread.IsCurrentThread()) {
+        if (m_recvThreadExit) return;
 
-        // Close calls are safe for both transport types
+        // 1. Signal exit flag FIRST so RecvThread knows it should terminate
+        m_recvThreadExit = true;
+
+        // 2. Close transports to unblock any pending Receive() calls.
+        // This is necessary because some transports (like sockets) are blocking
+        // and won't return until a message arrives or the resource is closed.
         m_recvTransport.Close();
         m_sendTransport.Close();
 
-        m_recvThreadExit = true;
+        // 3. Exit/Join the receive thread.
         m_recvThread.ExitThread();
 
-        return MakeDelegate(this, &NetworkEngine::Stop, m_thread, WAIT_INFINITE)();
+        // 4. Marshal the rest of the cleanup to the Network Thread.
+        return dmq::MakeDelegate(this, &NetworkEngine::Stop, m_thread, dmq::WAIT_INFINITE)();
     }
     m_timeoutTimer.Stop();
     m_timeoutTimerConn.Disconnect();
@@ -216,7 +233,7 @@ void NetworkEngine::RegisterEndpoint(dmq::DelegateRemoteId id, dmq::IRemoteInvok
     if (!m_thread.IsCurrentThread())
     {
         // Marshal the call to the Network Thread
-        MakeDelegate(this, &NetworkEngine::RegisterEndpoint, m_thread, dmq::WAIT_INFINITE)(id, endpoint);
+        dmq::MakeDelegate(this, &NetworkEngine::RegisterEndpoint, m_thread, dmq::WAIT_INFINITE)(id, endpoint);
         return;
     }
 
@@ -228,26 +245,25 @@ void NetworkEngine::RegisterEndpoint(dmq::DelegateRemoteId id, dmq::IRemoteInvok
 // RecvThread
 //------------------------------------------------------------------------------
 /// @brief The main loop for the background receive thread.
-/// 
-/// @details This function continuously polls the underlying transport layer for 
-/// incoming data. When a packet is successfully received:
-/// 1. It extracts the header and payload into a stream.
-/// 2. It marshals the data to the internal `NetworkEngine` thread by asynchronously 
-///    invoking `Incoming()`.
-/// 
-/// The `INVOKE_TIMEOUT` ensures that if the main Network Thread is deadlocked or 
-/// its queue is full, this receive thread won't hang indefinitely trying to 
-/// enqueue the message.
 void NetworkEngine::RecvThread()
 {
     // Timeout for enqueuing the message to the main thread.
     static const std::chrono::milliseconds INVOKE_TIMEOUT(1000);
 
+    std::shared_ptr<dmq::xstringstream> arg_data;
+
     while (!m_recvThreadExit)
     {
         DmqHeader header;
-        // Use a shared_ptr for the stream to efficiently pass data between threads
-        auto arg_data = xmake_shared<xstringstream>(std::ios::in | std::ios::out | std::ios::binary);
+        
+        // Only allocate a new stream if we dispatched the previous one
+        if (!arg_data) {
+            arg_data = dmq::xmake_shared<dmq::xstringstream>(std::ios::in | std::ios::out | std::ios::binary);
+        } else {
+            // Reuse the existing stream: clear error flags and empty its contents
+            arg_data->clear();
+            arg_data->str(dmq::xstring());
+        }
 
         // Block reading from the physical transport
         int error = m_recvTransport.Receive(*arg_data, header);
@@ -256,7 +272,10 @@ void NetworkEngine::RecvThread()
         {
             // Dispatch processing to the main NetworkEngine thread. 
             // Passes ownership of the data stream via shared_ptr (no deep copy).
-            MakeDelegate(this, &NetworkEngine::Incoming, m_thread, INVOKE_TIMEOUT).AsyncInvoke(header, arg_data);
+            dmq::MakeDelegate(this, &NetworkEngine::Incoming, m_thread, INVOKE_TIMEOUT).AsyncInvoke(header, arg_data);
+            
+            // Release our local reference so a new one is allocated next iteration
+            arg_data.reset();
         }
     }
 }
@@ -265,20 +284,10 @@ void NetworkEngine::RecvThread()
 // Incoming
 //------------------------------------------------------------------------------
 /// @brief Handles incoming messages on the main Network Thread.
-/// 
-/// @details This function acts as the central dispatcher. It:
-/// 1. Ignores ACK messages (which are typically handled by the TransportMonitor 
-///    or blocking wait logic).
-/// 2. Looks up the registered `IRemoteInvoker` endpoint associated with the message ID.
-/// 3. Invokes the endpoint to deserialize the arguments and trigger the 
-///    corresponding application callback.
-/// 
-/// @param[in] header The message header containing the Remote ID.
-/// @param[in] arg_data The serialized payload stream.
-void NetworkEngine::Incoming(DmqHeader& header, std::shared_ptr<xstringstream> arg_data)
+void NetworkEngine::Incoming(DmqHeader& header, std::shared_ptr<dmq::xstringstream> arg_data)
 {
     // Filter out ACKs; we only dispatch application data here.
-    if (header.GetId() != ACK_REMOTE_ID) {
+    if (header.GetId() != dmq::ACK_REMOTE_ID) {
         // Find the registered endpoint for this Message ID
         auto it = m_receiveIdMap.find(header.GetId());
 
@@ -291,16 +300,19 @@ void NetworkEngine::Incoming(DmqHeader& header, std::shared_ptr<xstringstream> a
 
 void NetworkEngine::Timeout() { m_transportMonitor.Process(); }
 
-void NetworkEngine::InternalErrorHandler(DelegateRemoteId id, DelegateError error, DelegateErrorAux aux) {
+void NetworkEngine::InternalErrorHandler(dmq::DelegateRemoteId id, dmq::DelegateError error, dmq::DelegateErrorAux aux) {
     OnError(id, error, aux);
 }
 
-void NetworkEngine::InternalStatusHandler(DelegateRemoteId id, uint16_t seq, TransportMonitor::Status status) {
+void NetworkEngine::InternalStatusHandler(dmq::DelegateRemoteId id, uint16_t seq, TransportMonitor::Status status) {
     OnStatus(id, seq, status);
 }
 
 // Default virtual implementations
-void NetworkEngine::OnError(DelegateRemoteId, DelegateError, DelegateErrorAux) {}
-void NetworkEngine::OnStatus(DelegateRemoteId, uint16_t, TransportMonitor::Status) {}
+void NetworkEngine::OnError(dmq::DelegateRemoteId, dmq::DelegateError, dmq::DelegateErrorAux) {}
+void NetworkEngine::OnStatus(dmq::DelegateRemoteId, uint16_t, TransportMonitor::Status) {}
+
+} // namespace dmq::util
+
 
 #endif // Defined Transport Check

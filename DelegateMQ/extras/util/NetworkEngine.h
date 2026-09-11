@@ -9,15 +9,28 @@
 // Only define NetworkEngine if a compatible transport is selected
 #if defined(DMQ_TRANSPORT_ZEROMQ) || defined(DMQ_TRANSPORT_WIN32_UDP) || defined(DMQ_TRANSPORT_LINUX_UDP) || defined(DMQ_TRANSPORT_STM32_UART) || defined(DMQ_TRANSPORT_SERIAL_PORT)
 
+#include "delegate/DelegateAsync.h"
+#include "delegate/DelegateAsyncWait.h"
 #include "extras/util/RemoteEndpoint.h"
 #include "extras/util/TransportMonitor.h"
 #include "extras/dispatcher/RemoteChannel.h"
-#include <map>
-#include <mutex>
 #include <atomic>
-#include <future>
-#include <iostream>
-#include <functional> 
+#include <functional>
+#include <utility>
+
+#if defined(DMQ_THREAD_STDLIB)
+    #include "port/os/stdlib/StdlibThread.h"
+#elif defined(DMQ_THREAD_WIN32)
+    #include "port/os/win32/Win32Thread.h"
+#elif defined(DMQ_THREAD_FREERTOS)
+    #include "port/os/freertos/FreeRTOSThread.h"
+#elif defined(DMQ_THREAD_THREADX)
+    #include "port/os/threadx/ThreadXThread.h"
+#elif defined(DMQ_THREAD_ZEPHYR)
+    #include "port/os/zephyr/ZephyrThread.h"
+#elif defined(DMQ_THREAD_CMSIS_RTOS2)
+    #include "port/os/cmsis-rtos2/CmsisRtos2Thread.h"
+#endif
 
 // SWITCH: Include the correct transport header based on CMake definitions
 #if defined(DMQ_TRANSPORT_ZEROMQ)
@@ -41,6 +54,8 @@
 #else
 #error "Select a NetworkEngine transport"
 #endif
+
+namespace dmq::util {
 
 /// @brief Base class for handling network transport, threading, and synchronization.
 /// 
@@ -132,72 +147,8 @@ public:
     template <class TClass, class RetType, class... Args>
     bool RemoteInvokeWait(dmq::DelegateMemberRemote<TClass, RetType(Args...)>& endpoint, Args&&... args)
     {
-        // 1. [Caller Thread] Check if we are on the Network Thread.
-        if (!m_thread.IsCurrentThread())
-        {
-            // 2. [Caller Thread] Create shared synchronization state.
-            struct SyncState {
-                std::atomic<bool> success{ false };
-                bool complete = false;
-                dmq::Mutex mtx;              // Generic Mutex
-                dmq::ConditionVariable cv;   // Generic CV
-                XALLOCATOR
-            };
-            auto state = xmake_shared<SyncState>();
-            dmq::DelegateRemoteId remoteId = endpoint.GetRemoteId();
-
-            // 3. [Caller Thread] Define the callback that wakes us up later.
-            std::function<void(dmq::DelegateRemoteId, uint16_t, TransportMonitor::Status)> statusCbFunc =
-                [state, remoteId](dmq::DelegateRemoteId id, uint16_t seq, TransportMonitor::Status status) {
-                if (id == remoteId) {
-                    {
-                        std::lock_guard<dmq::Mutex> lock(state->mtx);
-                        state->complete = true;
-                        if (status == TransportMonitor::Status::SUCCESS)
-                            state->success.store(true);
-                    }
-                    // 9. [Network Thread] Notify the waiting caller thread.
-                    state->cv.notify_one();
-                }
-                };
-
-            // 4. [Caller Thread] Register the callback.
-            dmq::ScopedConnection conn = m_transportMonitor.OnSendStatus.Connect(dmq::MakeDelegate(statusCbFunc));
-
-            // 5. [Caller Thread] Define the "Send" logic lambda.
-            auto* epPtr = &endpoint;
-            std::function<bool(Args...)> asyncCallFunc = [epPtr](auto&&... fwdArgs) -> bool {
-                // 7. [Network Thread] Execute the send operation.
-                (*epPtr)(std::forward<decltype(fwdArgs)>(fwdArgs)...);
-                return (epPtr->GetError() == dmq::DelegateError::SUCCESS);
-                };
-
-            // 6. [Caller Thread] Dispatch the lambda to the Network Thread queue.
-            auto retVal = dmq::MakeDelegate(asyncCallFunc, m_thread, SEND_TIMEOUT)
-                .AsyncInvoke(std::forward<Args>(args)...);
-
-            if (retVal.has_value() && retVal.value() == true)
-            {
-                // 8. [Caller Thread] BLOCK and Wait.
-                std::unique_lock<dmq::Mutex> lock(state->mtx);
-                // wait_for returns false if the predicate is still false after the timeout
-                state->cv.wait_for(lock, RECV_TIMEOUT, [&] {
-                    return state->complete;
-                    });
-                // 10. [Caller Thread] Wake up! The wait is over.
-            }
-
-            // 11. [Caller Thread] Cleanup and return result.
-            // 'conn' goes out of scope here and automatically disconnects
-            return state->success.load();
-        }
-        else
-        {
-            // 12. [Network Thread] Alternative Path:
-            //     We are already on the correct thread, so execute immediately.
-            endpoint(std::forward<Args>(args)...);
-            return (endpoint.GetError() == dmq::DelegateError::SUCCESS);
-        }
+        return RemoteInvokeWaitInternal<dmq::DelegateMemberRemote<TClass, RetType(Args...)>, Args...>(
+            endpoint, std::forward<Args>(args)...);
     }
 
     /// @brief Overload of RemoteInvokeWait that accepts a RemoteChannel directly.
@@ -207,62 +158,15 @@ public:
     template <class RetType, class... Args>
     bool RemoteInvokeWait(dmq::RemoteChannel<RetType(Args...)>& channel, Args&&... args)
     {
-        if (!m_thread.IsCurrentThread())
-        {
-            struct SyncState {
-                std::atomic<bool> success{ false };
-                bool complete = false;
-                dmq::Mutex mtx;
-                dmq::ConditionVariable cv;
-                XALLOCATOR
-            };
-            auto state = xmake_shared<SyncState>();
-            dmq::DelegateRemoteId remoteId = channel.GetRemoteId();
-
-            std::function<void(dmq::DelegateRemoteId, uint16_t, TransportMonitor::Status)> statusCbFunc =
-                [state, remoteId](dmq::DelegateRemoteId id, uint16_t seq, TransportMonitor::Status status) {
-                if (id == remoteId) {
-                    {
-                        std::lock_guard<dmq::Mutex> lock(state->mtx);
-                        state->complete = true;
-                        if (status == TransportMonitor::Status::SUCCESS)
-                            state->success.store(true);
-                    }
-                    state->cv.notify_one();
-                }
-            };
-
-            dmq::ScopedConnection conn = m_transportMonitor.OnSendStatus.Connect(dmq::MakeDelegate(statusCbFunc));
-
-            auto* chPtr = &channel;
-            std::function<bool(Args...)> asyncCallFunc = [chPtr](auto&&... fwdArgs) -> bool {
-                (*chPtr)(std::forward<decltype(fwdArgs)>(fwdArgs)...);
-                return (chPtr->GetError() == dmq::DelegateError::SUCCESS);
-            };
-
-            auto retVal = dmq::MakeDelegate(asyncCallFunc, m_thread, SEND_TIMEOUT)
-                .AsyncInvoke(std::forward<Args>(args)...);
-
-            if (retVal.has_value() && retVal.value() == true)
-            {
-                std::unique_lock<dmq::Mutex> lock(state->mtx);
-                state->cv.wait_for(lock, RECV_TIMEOUT, [&] { return state->complete; });
-            }
-
-            return state->success.load();
-        }
-        else
-        {
-            channel(std::forward<Args>(args)...);
-            return (channel.GetError() == dmq::DelegateError::SUCCESS);
-        }
+        return RemoteInvokeWaitInternal<dmq::RemoteChannel<RetType(Args...)>, Args...>(
+            channel, std::forward<Args>(args)...);
     }
 
 protected:
     /// @brief Returns the send-side transport for use by RemoteChannel instances.
     /// @details Derived classes can pass this to RemoteChannel constructors so each
     /// channel owns its own Dispatcher while sharing the same physical transport.
-    ITransport& GetSendTransport() {
+    dmq::transport::ITransport& GetSendTransport() {
 #if defined(DMQ_TRANSPORT_ZEROMQ)
         return m_sendTransport;
 #else
@@ -270,7 +174,7 @@ protected:
 #endif
     }
 
-    Thread m_thread;
+    dmq::os::Thread m_thread;
     Dispatcher m_dispatcher;
     TransportMonitor m_transportMonitor;
 
@@ -278,13 +182,130 @@ protected:
     virtual void OnStatus(dmq::DelegateRemoteId id, uint16_t seq, TransportMonitor::Status status);
 
 private:
+    /// @brief Shared synchronization state for RemoteInvokeWaitInternal().
+    /// @details All fields are guarded by `mtx`. The dispatched sequence number
+    /// is not known until the send executes on the network thread, but the ACK
+    /// (or timeout) status can arrive on the receive/timer thread first — e.g.
+    /// on a loopback transport. Statuses that arrive before the seq is recorded
+    /// are buffered in `early` and reconciled by the send lambda, so a fast ACK
+    /// is never lost.
+    struct InvokeWaitState {
+        bool complete = false;      ///< Terminal status received for expectedSeq
+        bool success = false;       ///< Terminal status was SUCCESS
+        bool seqSet = false;        ///< expectedSeq is valid
+        uint16_t expectedSeq = 0;   ///< Seq assigned to the dispatched message
+        /// Statuses received before seqSet land here.
+        dmq::xmap<uint16_t, TransportMonitor::Status> early;
+        dmq::Mutex mtx;              // Generic Mutex
+        dmq::ConditionVariable cv;   // Generic CV
+        XALLOCATOR
+    };
+
+    /// @brief Shared implementation for both RemoteInvokeWait() overloads.
+    /// @tparam Target A sender exposing operator()(Args...), GetRemoteId(),
+    /// GetError(), and GetLastSeqNum() — i.e. DelegateMemberRemote or RemoteChannel.
+    template <class Target, class... Args>
+    bool RemoteInvokeWaitInternal(Target& target, Args&&... args)
+    {
+        // [Network Thread] Already on the correct thread: send immediately,
+        // no blocking wait is possible (we would deadlock waiting on ourselves).
+        if (m_thread.IsCurrentThread())
+        {
+            target(std::forward<Args>(args)...);
+            return (target.GetError() == dmq::DelegateError::SUCCESS);
+        }
+
+        // 1. [Caller Thread] Create shared synchronization state.
+        auto state = dmq::xmake_shared<InvokeWaitState>();
+        dmq::DelegateRemoteId remoteId = target.GetRemoteId();
+
+        // 2. [Caller Thread] Define the status callback that wakes us up later.
+        // Fires on the receive thread (ACK) or timer thread (timeout).
+        std::function<void(dmq::DelegateRemoteId, uint16_t, TransportMonitor::Status)> statusCbFunc =
+            [state, remoteId](dmq::DelegateRemoteId id, uint16_t seq, TransportMonitor::Status status) {
+                if (id != remoteId)
+                    return;
+                bool notify = false;
+                {
+                    dmq::LockGuard<dmq::Mutex> lock(state->mtx);
+                    if (!state->seqSet) {
+                        // Send thread has not recorded the seq yet; buffer the
+                        // status so the send lambda can reconcile it.
+                        state->early[seq] = status;
+                    }
+                    else if (!state->complete && seq == state->expectedSeq) {
+                        state->complete = true;
+                        state->success = (status == TransportMonitor::Status::SUCCESS);
+                        notify = true;
+                    }
+                }
+                if (notify)
+                    state->cv.notify_one();
+            };
+
+        // 3. [Caller Thread] Register the callback.
+        dmq::ScopedConnection conn = m_transportMonitor.OnSendStatus.Connect(dmq::MakeDelegate(statusCbFunc));
+
+        // 4. [Caller Thread] Define the "Send" logic lambda.
+        auto* targetPtr = &target;
+        std::function<bool(Args...)> asyncCallFunc = [targetPtr, state](auto&&... fwdArgs) -> bool {
+            (*targetPtr)(std::forward<decltype(fwdArgs)>(fwdArgs)...);
+            bool notify = false;
+            {
+                dmq::LockGuard<dmq::Mutex> lock(state->mtx);
+                state->expectedSeq = targetPtr->GetLastSeqNum();
+                state->seqSet = true;
+
+                // Reconcile any status that arrived before the seq was known
+                auto it = state->early.find(state->expectedSeq);
+                if (it != state->early.end()) {
+                    state->complete = true;
+                    state->success = (it->second == TransportMonitor::Status::SUCCESS);
+                    notify = true;
+                }
+                
+                state->early.clear();
+            }
+            if (notify)
+                state->cv.notify_one();
+            return (targetPtr->GetError() == dmq::DelegateError::SUCCESS);
+        };
+
+        // 5. [Caller Thread] Dispatch the lambda to the Network Thread queue.
+        // Must block until asyncCallFunc actually runs (or throws) on the network
+        // thread rather than timing out on the *queueing* wait: asyncCallFunc
+        // captures a raw pointer to the caller's `target`. If this wait timed out
+        // while the message was still queued (a short SEND_TIMEOUT was previously
+        // used here), a caller seeing "failed" could free `target` while the
+        // still-queued closure later runs against a dangling pointer. Every other
+        // marshal-to-network-thread call site in this file (Initialize, Start,
+        // RegisterEndpoint, Stop) uses WAIT_INFINITE for the same reason.
+        auto retVal = dmq::MakeDelegate(std::move(asyncCallFunc), m_thread, dmq::WAIT_INFINITE)
+            .AsyncInvoke(std::forward<Args>(args)...);
+
+        if (retVal.has_value() && retVal.value() == true)
+        {
+            // 6. [Caller Thread] BLOCK until the status callback (or the send
+            // lambda's reconciliation) completes the wait, or timeout.
+            dmq::UniqueLock<dmq::Mutex> lock(state->mtx);
+            state->cv.wait_for(lock, RECV_TIMEOUT, [&] { return state->complete; });
+            return state->success;
+        }
+
+        // 7. [Caller Thread] Send failed or timed out queueing to the network
+        // thread. 'conn' disconnects on scope exit; 'state' stays alive via
+        // shared_ptr if a late status callback races with our return.
+        dmq::LockGuard<dmq::Mutex> lock(state->mtx);
+        return state->success;
+    }
+
     void RecvThread();
-    void Incoming(DmqHeader& header, std::shared_ptr<xstringstream> arg_data);
+    void Incoming(dmq::transport::DmqHeader& header, std::shared_ptr<dmq::xstringstream> arg_data);
     void Timeout();
     void InternalErrorHandler(dmq::DelegateRemoteId id, dmq::DelegateError error, dmq::DelegateErrorAux aux);
     void InternalStatusHandler(dmq::DelegateRemoteId id, uint16_t seq, TransportMonitor::Status status);
 
-    Thread m_recvThread;
+    dmq::os::Thread m_recvThread;
     std::atomic<bool> m_recvThreadExit{ false };
     bool m_recvThreadCreated = false;
     Timer m_timeoutTimer;
@@ -292,22 +313,22 @@ private:
 
     // SWITCH: Transport Members
 #if defined(DMQ_TRANSPORT_ZEROMQ)
-    ZeroMqTransport m_sendTransport;
-    ZeroMqTransport m_recvTransport;
+    dmq::transport::ZeroMqTransport m_sendTransport;
+    dmq::transport::ZeroMqTransport m_recvTransport;
 
     // ZeroMQ already has reliable communication
 
 #elif defined(DMQ_TRANSPORT_WIN32_UDP)
-    UdpTransport m_sendTransport;
-    UdpTransport m_recvTransport;
+    dmq::transport::Win32UdpTransport m_sendTransport;
+    dmq::transport::Win32UdpTransport m_recvTransport;
 
     // Reliability Layers
     RetryMonitor m_retryMonitor;
     ReliableTransport m_reliableTransport;
 
 #elif defined(DMQ_TRANSPORT_LINUX_UDP)
-    UdpTransport m_sendTransport;
-    UdpTransport m_recvTransport;
+    dmq::transport::LinuxUdpTransport m_sendTransport;
+    dmq::transport::LinuxUdpTransport m_recvTransport;
 
     // Reliability Layers
     RetryMonitor m_retryMonitor;
@@ -315,11 +336,11 @@ private:
 
 #elif defined(DMQ_TRANSPORT_STM32_UART)
     // Single Shared Transport Instance (Owns the buffers/state)
-    Stm32UartTransport m_transport;
+    dmq::transport::Stm32UartTransport m_transport;
 
     // References (Aliases used by generic code)
-    Stm32UartTransport& m_sendTransport;
-    Stm32UartTransport& m_recvTransport;
+    dmq::transport::Stm32UartTransport& m_sendTransport;
+    dmq::transport::Stm32UartTransport& m_recvTransport;
 
     // Reliability Layers
     RetryMonitor m_retryMonitor;
@@ -327,23 +348,25 @@ private:
 
 #elif defined(DMQ_TRANSPORT_SERIAL_PORT)
     // Single Shared Transport Instance
-    SerialTransport m_transport;
+    dmq::transport::SerialTransport m_transport;
 
     // References required by generic code
-    SerialTransport& m_sendTransport;
-    SerialTransport& m_recvTransport;
+    dmq::transport::SerialTransport& m_sendTransport;
+    dmq::transport::SerialTransport& m_recvTransport;
 
     // Reliability Layers
     RetryMonitor m_retryMonitor;
     ReliableTransport m_reliableTransport;
-#endif
+    #endif
 
-    std::map<dmq::DelegateRemoteId, dmq::IRemoteInvoker*> m_receiveIdMap;
+    dmq::xmap<dmq::DelegateRemoteId, dmq::IRemoteInvoker*> m_receiveIdMap;
     dmq::ScopedConnection m_statusConn;
 
-    static const std::chrono::milliseconds SEND_TIMEOUT;
     static const std::chrono::milliseconds RECV_TIMEOUT;
 };
+
+} // namespace dmq::util
+
 
 #endif // Defined Transport Check
 #endif // NETWORK_ENGINE_H

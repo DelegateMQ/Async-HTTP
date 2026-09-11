@@ -1,6 +1,8 @@
 #include "Allocator.h"
+#include "delegate/DelegateOpt.h"
 #include <new>
-#include <assert.h>
+
+namespace dmq {
 
 //------------------------------------------------------------------------------
 // Constructor
@@ -33,7 +35,10 @@ Allocator::Allocator(size_t size, uint32_t objects, char* memory, const char* na
 		}
 	}
 	else
+	{
+		m_pPool = NULL;
 		m_allocatorMode = HEAP_BLOCKS;
+	}
 }
 
 //------------------------------------------------------------------------------
@@ -55,9 +60,9 @@ Allocator::~Allocator()
 //------------------------------------------------------------------------------
 // Allocate
 //------------------------------------------------------------------------------
-void* Allocator::Allocate(size_t size)
+void* Allocator::Allocate([[maybe_unused]] size_t size)
 {
-    assert(size <= m_objectSize);
+    ASSERT_TRUE(size <= m_objectSize);
 	
     // If can't obtain existing block then get a new one
     void* pBlock = Pop();
@@ -78,11 +83,18 @@ void* Allocator::Allocate(size_t size)
                 std::new_handler handler = std::set_new_handler(0);
                 std::set_new_handler(handler);
 
-                // If a new handler is defined, call it
-                if (handler)
-                    (*handler)();
-                else
-                    assert(0);
+                while (!pBlock)
+                {
+                    if (handler)
+                    {
+                        (*handler)();
+                        pBlock = Pop();
+                    }
+                    else
+                    {
+                        BAD_ALLOC();
+                    }
+                }
             }
         }
         else
@@ -92,8 +104,11 @@ void* Allocator::Allocate(size_t size)
         }
     }
 
-    m_blocksInUse++;
-    m_allocations++;
+    if (pBlock)
+    {
+        m_blocksInUse++;
+        m_allocations++;
+    }
 	
     return pBlock;
 }
@@ -103,9 +118,31 @@ void* Allocator::Allocate(size_t size)
 //------------------------------------------------------------------------------
 void Allocator::Deallocate(void* pBlock)
 {
+#ifdef DMQ_ALLOCATOR_SAFEGUARDS
+	if (m_allocatorMode == STATIC_POOL || m_allocatorMode == HEAP_POOL)
+	{
+		// Check that pBlock is within the pool range
+		char* pCharBlock = (char*)pBlock;
+		ASSERT_TRUE(pCharBlock >= m_pPool && pCharBlock < (m_pPool + (m_blockSize * m_maxObjects)));
+
+		// Check that pBlock is aligned on a block boundary
+		ASSERT_TRUE(((size_t)(pCharBlock - m_pPool) % m_blockSize) == 0);
+	}
+#endif
+
     Push(pBlock);
 	m_blocksInUse--;
 	m_deallocations++;
+}
+
+//------------------------------------------------------------------------------
+// AccountAlloc
+//------------------------------------------------------------------------------
+void Allocator::AccountAlloc(bool newBlock)
+{
+    if (newBlock) m_blockCnt++;
+    m_blocksInUse++;
+    m_allocations++;
 }
 
 //------------------------------------------------------------------------------
@@ -133,6 +170,8 @@ void* Allocator::Pop()
 
     return (void*)pBlock;
 }
+
+} // namespace dmq
 
 
 

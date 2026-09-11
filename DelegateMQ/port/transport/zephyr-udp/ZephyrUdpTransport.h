@@ -13,8 +13,25 @@
 /// 
 /// **Prerequisites:**
 /// * Enable BSD Sockets: `CONFIG_NET_SOCKETS=y`
-/// * Enable POSIX Names: `CONFIG_NET_SOCKETS_POSIX_NAMES=y` (Default)
 /// * Enable IPv4: `CONFIG_NET_IPV4=y`
+/// * A network interface: on `native_sim` the loopback interface
+///   (`CONFIG_NET_LOOPBACK=y`, needs `CONFIG_NET_DRIVERS=y`) is enough for
+///   same-process testing with no host-side setup -- see
+///   `example/sample-projects/zephyr-udp-serializer/prj.conf`. A real
+///   target instead needs its actual link-layer driver (Ethernet, Wi-Fi, etc.).
+///
+/// This file calls the `zsock_*`-prefixed socket functions (`zsock_socket()`,
+/// `zsock_bind()`, `zsock_sendto()`, etc.) rather than the unprefixed BSD
+/// names. Getting the unprefixed names requires `CONFIG_POSIX_API=y`, which
+/// replaces large parts of the standard header set (`<sys/socket.h>`,
+/// pthread types, ...) with Zephyr's own POSIX compatibility layer --
+/// something that collides with the *host's* C++ standard library headers
+/// when building for `native_sim` (which links against the host's real
+/// libstdc++), and is unnecessary weight on a real target that has no such
+/// conflict. `CONFIG_NET_SOCKETS_POSIX_NAMES`, an older, narrower way to get
+/// just the unprefixed socket names without the rest of `CONFIG_POSIX_API`,
+/// was deprecated in Zephyr 3.7 and removed -- `zsock_*` is the current,
+/// portable choice regardless of target.
 /// 
 /// **Key Features:**
 /// 1. **Direct Execution**: Executes network operations directly on the calling thread,
@@ -24,9 +41,9 @@
 /// 4. **Endianness**: Uses `htons`/`ntohs` for standard network byte order compatibility.
 
 #include "delegate/DelegateOpt.h"
-#include "port/transport/ITransport.h"
-#include "port/transport/DmqHeader.h"
-#include "port/transport/ITransportMonitor.h"
+#include "port/transport/common/ITransport.h"
+#include "port/transport/common/DmqHeader.h"
+#include "port/transport/common/ITransportMonitor.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/net/socket.h>
@@ -36,6 +53,9 @@
 #include <cstring>
 #include <cstdlib>
 #include <cerrno>
+#include <mutex>
+
+namespace dmq::transport {
 
 class ZephyrUdpTransport : public ITransport
 {
@@ -57,10 +77,12 @@ public:
 
     int Create(Type type, const char* addr, uint16_t port)
     {
+        const std::lock_guard<dmq::RecursiveMutex> lock(m_mutex);
         m_type = type;
 
-        // Create UDP socket using Zephyr BSD API
-        m_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        // Create UDP socket. zsock_* (not the bare BSD names) so this
+        // compiles without CONFIG_POSIX_API -- see the class doc comment.
+        m_socket = zsock_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (m_socket < 0)
         {
             // printk("Socket creation failed: %d\n", errno);
@@ -73,8 +95,7 @@ public:
 
         if (type == Type::PUB)
         {
-            // inet_pton is standard in Zephyr's socket.h
-            if (inet_pton(AF_INET, addr, &m_addr.sin_addr) != 1)
+            if (zsock_inet_pton(AF_INET, addr, &m_addr.sin_addr) != 1)
             {
                 // printk("Invalid IP address format.\n");
                 Close();
@@ -87,7 +108,7 @@ public:
             timeout.tv_sec = 0;
             timeout.tv_usec = 50000; // 50ms
 
-            if (setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
+            if (zsock_setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
             {
                 // printk("setsockopt(SO_RCVTIMEO) failed\n");
                 Close();
@@ -98,7 +119,7 @@ public:
         {
             m_addr.sin_addr.s_addr = INADDR_ANY;
 
-            if (bind(m_socket, (struct sockaddr*)&m_addr, sizeof(m_addr)) < 0)
+            if (zsock_bind(m_socket, (struct sockaddr*)&m_addr, sizeof(m_addr)) < 0)
             {
                 // printk("Bind failed: %d\n", errno);
                 Close();
@@ -110,7 +131,7 @@ public:
             timeout.tv_sec = 2;
             timeout.tv_usec = 0;
 
-            if (setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
+            if (zsock_setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
             {
                 // printk("setsockopt(SO_RCVTIMEO) failed\n");
                 Close();
@@ -123,6 +144,7 @@ public:
 
     void Close()
     {
+        const std::lock_guard<dmq::RecursiveMutex> lock(m_mutex);
         if (m_socket >= 0)
         {
             // zsock_shutdown helps wake up blocked threads
@@ -132,9 +154,22 @@ public:
         }
     }
 
+    void SetRecvTimeout(std::chrono::milliseconds timeout)
+    {
+        const std::lock_guard<dmq::RecursiveMutex> lock(m_mutex);
+        if (m_socket >= 0)
+        {
+            struct timeval tv;
+            tv.tv_sec = timeout.count() / 1000;
+            tv.tv_usec = (timeout.count() % 1000) * 1000;
+            zsock_setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        }
+    }
+
     virtual int Send(xostringstream& os, const DmqHeader& header) override
     {
-        if (os.bad() || os.fail()) {
+        const std::lock_guard<dmq::RecursiveMutex> lock(m_mutex);
+        if (os.bad() || os.fail() || m_socket < 0) {
             return -1;
         }
 
@@ -147,55 +182,50 @@ public:
             return -1;
         }
 
-        // Create a local copy to modify the length
-        DmqHeader headerCopy = header;
-
-        // Calculate payload size and set it
+        // Get payload and set length on the copy
         auto payload = os.str();
-        if (payload.length() > UINT16_MAX) {
+        uint16_t payloadLen = static_cast<uint16_t>(payload.length());
+
+        if (payloadLen > (BUFFER_SIZE - DmqHeader::HEADER_SIZE)) {
             return -1;
         }
-        headerCopy.SetLength(static_cast<uint16_t>(payload.length()));
-
-        xostringstream ss(std::ios::in | std::ios::out | std::ios::binary);
 
         // Convert to Network Byte Order (Big Endian)
-        uint16_t marker = htons(headerCopy.GetMarker());
-        uint16_t id     = htons(headerCopy.GetId());
-        uint16_t seqNum = htons(headerCopy.GetSeqNum());
-        uint16_t length = htons(headerCopy.GetLength());
+        uint16_t marker = htons(header.GetMarker());
+        uint16_t id     = htons(header.GetId());
+        uint16_t seqNum = htons(header.GetSeqNum());
+        uint16_t length = htons(payloadLen);
 
-        ss.write(reinterpret_cast<const char*>(&marker), sizeof(marker));
-        ss.write(reinterpret_cast<const char*>(&id), sizeof(id));
-        ss.write(reinterpret_cast<const char*>(&seqNum), sizeof(seqNum));
-        ss.write(reinterpret_cast<const char*>(&length), sizeof(length));
+        // Copy Header & Payload into the linear buffer
+        memcpy(m_sendBuffer, &marker, 2);
+        memcpy(m_sendBuffer + 2, &id, 2);
+        memcpy(m_sendBuffer + 4, &seqNum, 2);
+        memcpy(m_sendBuffer + 6, &length, 2);
 
-        // Append Payload
-        ss.write(payload.data(), payload.size());
+        if (payloadLen > 0) {
+            memcpy(m_sendBuffer + DmqHeader::HEADER_SIZE, payload.data(), payloadLen);
+        }
 
-        auto data = ss.str();
+        size_t totalSize = DmqHeader::HEADER_SIZE + payloadLen;
 
-        ssize_t sent = sendto(m_socket, data.c_str(), data.size(), 0,
+        ssize_t sent = zsock_sendto(m_socket, m_sendBuffer, totalSize, 0,
             (struct sockaddr*)&m_addr, sizeof(m_addr));
-        if (sent != (ssize_t)data.size()) return -1;
-
-        // Always track the message (unless it is an ACK)
-        if (headerCopy.GetId() != dmq::ACK_REMOTE_ID && m_transportMonitor)
-            m_transportMonitor->Add(headerCopy.GetSeqNum(), headerCopy.GetId());
+        if (sent != (ssize_t)totalSize) return -1;
 
         return 0;
     }
 
     virtual int Receive(xstringstream& is, DmqHeader& header) override
     {
-        if (m_recvTransport != this) {
+        const std::lock_guard<dmq::RecursiveMutex> lock(m_mutex);
+        if (m_recvTransport != this || m_socket < 0) {
             return -1;
         }
 
         sockaddr_in fromAddr;
         socklen_t addrLen = sizeof(fromAddr);
         
-        ssize_t size = recvfrom(m_socket, m_buffer, sizeof(m_buffer), 0,
+        ssize_t size = zsock_recvfrom(m_socket, m_buffer, sizeof(m_buffer), 0,
             (struct sockaddr*)&fromAddr, &addrLen);
 
         if (size < 0)
@@ -207,61 +237,56 @@ public:
             return -1;
         }
 
-        // Important: Update m_addr to the sender's address so we can ACK back
-        if (m_type == Type::SUB) {
-            m_addr = fromAddr;
+        if (size < DmqHeader::HEADER_SIZE) {
+            return -1;
         }
 
-        xstringstream headerStream(std::ios::in | std::ios::out | std::ios::binary);
-        headerStream.write(m_buffer, size);
-        headerStream.seekg(0);
+        // 1. Read Header (Network Byte Order)
+        uint16_t marker, id, seqNum, length;
+        memcpy(&marker, m_buffer, 2);
+        memcpy(&id,     m_buffer + 2, 2);
+        memcpy(&seqNum, m_buffer + 4, 2);
+        memcpy(&length, m_buffer + 6, 2);
 
-        uint16_t val = 0;
-
-        // 1. Read Marker (Convert Network -> Host)
-        headerStream.read(reinterpret_cast<char*>(&val), sizeof(val));
-        header.SetMarker(ntohs(val));
+        header.SetMarker(ntohs(marker));
+        header.SetId(ntohs(id));
+        header.SetSeqNum(ntohs(seqNum));
+        header.SetLength(ntohs(length));
 
         if (header.GetMarker() != DmqHeader::MARKER)
         {
             return -1; // Invalid marker
         }
 
-        // 2. Read ID
-        headerStream.read(reinterpret_cast<char*>(&val), sizeof(val));
-        header.SetId(ntohs(val));
+        // Important: Update m_addr to the sender's address so we can ACK back
+        if (m_type == Type::SUB) {
+            m_addr = fromAddr;
+        }
 
-        // 3. Read SeqNum
-        headerStream.read(reinterpret_cast<char*>(&val), sizeof(val));
-        header.SetSeqNum(ntohs(val));
+        // 2. Extract Payload
+        uint16_t payloadSize = header.GetLength();
+        if (payloadSize > (size - DmqHeader::HEADER_SIZE))
+            payloadSize = static_cast<uint16_t>(size - DmqHeader::HEADER_SIZE);
 
-        // 4. Read Length
-        headerStream.read(reinterpret_cast<char*>(&val), sizeof(val));
-        header.SetLength(ntohs(val));
+        if (payloadSize > 0) {
+            is.clear();
+            is.str("");
+            is.write(m_buffer + DmqHeader::HEADER_SIZE, payloadSize);
+        }
 
-        if (size < (ssize_t)(DmqHeader::HEADER_SIZE + header.GetLength()))
-            return -1;
-
-        is.clear();
-        is.str("");
-        is.write(m_buffer + DmqHeader::HEADER_SIZE, header.GetLength());
-
-        // Logic check using Host values
-        uint16_t id = header.GetId();
-        uint16_t seqNum = header.GetSeqNum();
-
-        if (id == dmq::ACK_REMOTE_ID)
+        if (header.GetId() == dmq::ACK_REMOTE_ID)
         {
             if (m_transportMonitor)
-                m_transportMonitor->Remove(seqNum);
+                m_transportMonitor->Remove(header.GetSeqNum());
         }
         else if (m_transportMonitor && m_sendTransport)
         {
-            // Send ACK
+            // Send ACK back using Send logic (recursive mutex handles it)
             xostringstream ss_ack;
             DmqHeader ack;
             ack.SetId(dmq::ACK_REMOTE_ID);
-            ack.SetSeqNum(seqNum);
+            ack.SetSeqNum(header.GetSeqNum());
+            ack.SetLength(0);
             m_sendTransport->Send(ss_ack, ack);
         }
 
@@ -294,6 +319,18 @@ private:
 
     static const int BUFFER_SIZE = 1500; // Ethernet MTU size
     char m_buffer[BUFFER_SIZE] = { 0 };
+    char m_sendBuffer[BUFFER_SIZE] = { 0 };
+    dmq::RecursiveMutex m_mutex;
 };
+
+/// @brief Backward-compatible name: application code (e.g. the sender.h/
+/// receiver.h pattern shared by every *-udp-serializer sample) references
+/// dmq::transport::UdpTransport generically and stays portable across
+/// whichever DMQ_TRANSPORT_* was selected at compile time, the same way
+/// dmq::os::Thread works across DMQ_THREAD_* -- see LinuxUdpTransport.h/
+/// Win32UdpTransport.h for the other two ports that already do this.
+using UdpTransport = ZephyrUdpTransport;
+
+}
 
 #endif // ZEPHYR_UDP_TRANSPORT_H

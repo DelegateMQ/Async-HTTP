@@ -7,13 +7,28 @@
 
 #include "UnicastDelegate.h"
 
+DMQ_OPTIMIZE_ON
+
 namespace dmq {
 
 template <class R>
 class UnicastDelegateSafe; // Not defined
 
-/// @brief A thread-safe delegate container storing one delegate. Void and  
-/// non-void return values supported. 
+namespace detail {
+
+/// @brief Copy the delegate pointer out under lock, then release. Non-templated:
+/// entirely independent of the owning container's signature. The caller invokes
+/// against the returned copy without holding the lock, avoiding circular lock
+/// dependencies if the target function itself tries to acquire it.
+inline std::shared_ptr<DelegateBase> UnicastSafeGet(const std::shared_ptr<DelegateBase>& delegate, RecursiveMutex& lock) {
+    const dmq::LockGuard<RecursiveMutex> g(lock);
+    return delegate;
+}
+
+} // namespace detail
+
+/// @brief A thread-safe delegate container storing one delegate. Void and
+/// non-void return values supported.
 template<class RetType, class... Args>
 class UnicastDelegateSafe<RetType(Args...)> : public UnicastDelegate<RetType(Args...)>
 {
@@ -48,17 +63,22 @@ public:
 
     /// Invoke the bound target.
     /// @param[in] args The arguments used when invoking the target function
-    /// @return The target function return value. 
-    RetType operator()(Args... args) {
-        const dmq::LockGuard<RecursiveMutex> lock(m_lock);
-        return BaseType::operator ()(args...);
+    /// @return The target function return value.
+    RetType operator()(Args... args) const {
+        // Lock only to fetch the delegate pointer. Release lock before
+        // invoking the delegate to prevent circular lock dependencies
+        // and deadlocks.
+        auto delegate = detail::UnicastSafeGet(this->m_delegate, m_lock);
+
+        if (delegate)
+            return (*static_cast<DelegateType*>(delegate.get()))(args...);
+        return RetType();
     }
 
-    /// Invoke the bound target functions. 
+    /// Invoke the bound target functions.
     /// @param[in] args The arguments used when invoking the target function
-    void Broadcast(Args... args) {
-        const dmq::LockGuard<RecursiveMutex> lock(m_lock);
-        BaseType::Broadcast(args...);
+    void Broadcast(Args... args) const {
+        operator()(args...);
     }
 
     /// Assign a delegate to the container.
@@ -80,7 +100,7 @@ public:
     /// @return A reference to the current object.
     UnicastDelegateSafe& operator=(const UnicastDelegateSafe& rhs) {
         if (this != &rhs) {
-            std::scoped_lock lock(m_lock, rhs.m_lock);
+            dmq::ScopedLock<RecursiveMutex, RecursiveMutex> lock(m_lock, rhs.m_lock);
             BaseType::operator=(rhs);
         }
         return *this;
@@ -91,7 +111,7 @@ public:
     /// @return A reference to the current object.
     UnicastDelegateSafe& operator=(UnicastDelegateSafe&& rhs) noexcept {
         if (this != &rhs) {
-            std::scoped_lock lock(m_lock, rhs.m_lock);
+            dmq::ScopedLock<RecursiveMutex, RecursiveMutex> lock(m_lock, rhs.m_lock);
             BaseType::operator=(std::move(rhs));
         }
         return *this;
@@ -138,5 +158,7 @@ private:
 };
 
 }
+
+DMQ_OPTIMIZE_OFF
 
 #endif

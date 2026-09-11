@@ -1,8 +1,12 @@
 #ifndef __ALLOCATOR_H
 #define __ALLOCATOR_H
 
+#include "../../delegate/DelegateOpt.h"
 #include <cstdint>
+#include <cstddef>
 #include <stddef.h>
+
+namespace dmq {
 
 /// @see https://github.com/endurodave/Allocator
 /// David Lafreniere
@@ -27,9 +31,22 @@ public:
     /// @return     Returns pointer to the block. Otherwise NULL if unsuccessful.
     void* Allocate(size_t size);
 
-    /// Return a pointer to the memory pool. 
+    /// Return a pointer to the memory pool.
     /// @param[in]  pBlock - block of memory deallocate (i.e push onto free-list)
     void Deallocate(void* pBlock);
+
+    /// Update allocation stats when xmalloc bypasses Allocate() to avoid holding
+    /// the global lock during heap allocation. Must be called under the global lock.
+    /// @param[in] newBlock - true if a fresh block was obtained from the heap.
+    void AccountAlloc(bool newBlock);
+
+    /// Push a memory block onto head of free-list.
+    /// @param[in]  pMemory - block of memory to push onto free-list
+    void Push(void* pMemory);
+
+    /// Pop a memory block from head of free-list.
+    /// @return     Returns pointer to the block. Otherwise NULL if unsuccessful.
+    void* Pop();
 
     /// Get the allocator name string.
     /// @return		A pointer to the allocator name or NULL if none was assigned.
@@ -37,14 +54,14 @@ public:
 
     /// Gets the fixed block memory size, in bytes, handled by the allocator.
     /// @return		The fixed block size in bytes.
-    size_t GetBlockSize() { return m_blockSize; }
+    size_t GetBlockSize() const { return m_blockSize; }
 
     /// Gets the maximum number of blocks created by the allocator.
     /// @return		The number of fixed memory blocks created.
     uint32_t GetBlockCount() { return m_blockCnt; }
 
     /// Gets the number of blocks in use.
-    /// @return		The number of blocks in use by the application.
+    /// @return		The number of fixed memory blocks in use.
     uint32_t GetBlocksInUse() { return m_blocksInUse; }
 
     /// Gets the total number of allocations for this allocator instance.
@@ -56,14 +73,6 @@ public:
     uint32_t GetDeallocations() { return m_deallocations; }
 	
 private:
-    /// Push a memory block onto head of free-list.
-    /// @param[in]  pMemory - block of memory to push onto free-list
-    void Push(void* pMemory);
-
-    /// Pop a memory block from head of free-list.
-    /// @return     Returns pointer to the block. Otherwise NULL if unsuccessful.
-    void* Pop();
-
     struct Block
     {
         Block* pNext;
@@ -94,24 +103,30 @@ public:
 	{
 	}
 private:
-	char m_memory[sizeof(T) * Objects];
+	alignas(std::max_align_t) char m_memory[sizeof(T) * Objects];
 };
+
+} // namespace dmq
 
 // macro to provide header file interface
 #define DECLARE_ALLOCATOR \
     public: \
         void* operator new(size_t size) { \
+            dmq::LockGuard<dmq::Mutex> lock(_allocatorMutex); \
             return _allocator.Allocate(size); \
         } \
         void operator delete(void* pObject) { \
+            dmq::LockGuard<dmq::Mutex> lock(_allocatorMutex); \
             _allocator.Deallocate(pObject); \
         } \
     private: \
-        static Allocator _allocator; 
+        static dmq::Allocator _allocator; \
+        static dmq::Mutex _allocatorMutex;
 
 // macro to provide source file interface
 #define IMPLEMENT_ALLOCATOR(class, objects, memory) \
-	Allocator class::_allocator(sizeof(class), objects, memory, #class);
+	dmq::Allocator class::_allocator(sizeof(class), objects, memory, #class); \
+	dmq::Mutex class::_allocatorMutex;
 
 #endif
 

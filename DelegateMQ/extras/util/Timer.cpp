@@ -3,25 +3,18 @@
 #include <chrono>
 #include <algorithm>
 
+namespace dmq::util {
+
 using namespace std;
-using namespace dmq;
 
-bool Timer::m_timerStopped = false;
-
-//------------------------------------------------------------------------------
-// TimerDisabled
-//------------------------------------------------------------------------------
-static bool TimerDisabled(Timer* value)
-{
-    return !(value->Enabled());
-}
+std::atomic<bool> Timer::m_timerStopped{false};
 
 //------------------------------------------------------------------------------
 // Constructor
 //------------------------------------------------------------------------------
 Timer::Timer()
 {
-    const std::lock_guard<RecursiveMutex> lock(GetLock());
+    const dmq::LockGuard<dmq::CriticalSection> lock(GetLock());
     m_enabled = false;
 }
 
@@ -30,36 +23,20 @@ Timer::Timer()
 //------------------------------------------------------------------------------
 Timer::~Timer()
 {
-#if !defined(__cpp_exceptions) || defined(DMQ_ASSERTS)
-    // Exception handling disabled. 
-    // We assume standard mutex operations won't throw in this embedded context.
-    const std::lock_guard<RecursiveMutex> lock(GetLock());
-    auto& timers = GetTimers();
-
-    if (timers.size() != 0) {
-        // Safely check before removing
-        auto it = std::find(timers.begin(), timers.end(), this);
-        if (it != timers.end()) {
-            timers.erase(it);
+    const dmq::LockGuard<dmq::CriticalSection> lock(GetLock());
+    
+    // Remove 'this' from the intrusive linked list
+    Timer** pp = &GetTimersHead();
+    while (*pp != nullptr)
+    {
+        if (*pp == this)
+        {
+            *pp = this->m_next;
+            this->m_next = nullptr;
+            break;
         }
+        pp = &((*pp)->m_next);
     }
-#else
-    try {
-        const std::lock_guard<RecursiveMutex> lock(GetLock());
-        auto& timers = GetTimers();
-
-        if (timers.size() != 0) {
-            // Safely check before removing
-            auto it = std::find(timers.begin(), timers.end(), this);
-            if (it != timers.end()) {
-                timers.erase(it);
-            }
-        }
-    }
-    catch (...) {
-        // Failsafe during static destruction
-    }
-#endif
 }
 
 //------------------------------------------------------------------------------
@@ -77,23 +54,32 @@ void Timer::Start(dmq::Duration timeout, bool once)
 #endif
     }
 
-    const std::lock_guard<RecursiveMutex> lock(GetLock());
+    const dmq::LockGuard<dmq::CriticalSection> lock(GetLock());
 
     m_timeout = timeout;
     m_once = once;
     m_expireTime = GetNow() + m_timeout;
     m_enabled = true;
 
-    // If 'this' is the 'next' item in the ProcessTimers loop, removing it 
-    // invalidates the iterator and causes a crash.
-    auto& timers = GetTimers();
-    bool found = (std::find(timers.begin(), timers.end(), this) != timers.end());
+    // Search for 'this' in the intrusive list
+    bool found = false;
+    Timer* p = GetTimersHead();
+    while (p != nullptr)
+    {
+        if (p == this)
+        {
+            found = true;
+            break;
+        }
+        p = p->m_next;
+    }
 
     // Only add if not already in the list. 
-    // If it IS in the list (even if disabled/stopped), we just updated 
-    // its state above, so it is now active again.
     if (!found)
-        timers.push_back(this);
+    {
+        m_next = GetTimersHead();
+        GetTimersHead() = this;
+    }
 
     LOG_INFO("Timer::Start timeout={}", m_timeout.count());
 }
@@ -103,12 +89,12 @@ void Timer::Start(dmq::Duration timeout, bool once)
 //------------------------------------------------------------------------------
 void Timer::Stop()
 {
-    const std::lock_guard<RecursiveMutex> lock(GetLock());
+    const dmq::LockGuard<dmq::CriticalSection> lock(GetLock());
 
     m_enabled = false;
 
     // Don't remove immediately! Just set a flag.
-    // Let ProcessTimers() handle the actual removal safely using remove_if
+    // Let ProcessTimers() handle the actual removal safely.
     m_timerStopped = true;
 
     LOG_INFO("Timer::Stop timeout={}", m_timeout.count());
@@ -117,14 +103,14 @@ void Timer::Stop()
 //------------------------------------------------------------------------------
 // CheckExpired
 //------------------------------------------------------------------------------
-void Timer::CheckExpired()
+bool Timer::CheckExpired()
 {
     if (!m_enabled)
-        return;
+        return false;
 
     // Has the timer expired?
     if (GetNow() < m_expireTime)
-        return;     // Not expired yet
+        return false;     // Not expired yet
 
     if (m_once)
     {
@@ -150,40 +136,70 @@ void Timer::CheckExpired()
         }
     }
 
-    // Call the client's expired callback function
-    if (!OnExpired.Empty()) {
-        OnExpired();
-    }
+    return true;
 }
 
 //------------------------------------------------------------------------------
 // ProcessTimers
 //------------------------------------------------------------------------------
 void Timer::ProcessTimers()
-{
-    const std::lock_guard<RecursiveMutex> lock(GetLock());
+{   
+    dmq::Signal<void()>::Snapshot snapshots[dmq::MAX_TIMER_EXPIRED];
+    size_t count = 0;
 
-    // Remove disabled timer from the list if stopped
-    if (m_timerStopped)
     {
-        GetTimers().remove_if(TimerDisabled);
-        m_timerStopped = false;
+        const dmq::LockGuard<dmq::CriticalSection> lock(GetLock());
+
+        // Remove disabled timer from the list if stopped
+        if (m_timerStopped)
+        {
+            Timer** pp = &GetTimersHead();
+            while (*pp != nullptr)
+            {
+                if (!((*pp)->m_enabled))
+                {
+                    Timer* next = (*pp)->m_next;
+                    (*pp)->m_next = nullptr;
+                    *pp = next;
+                }
+                else
+                {
+                    pp = &((*pp)->m_next);
+                }
+            }
+            m_timerStopped = false;
+        }
+
+        // Identify expired timers while holding the lock.
+        // NOTE: Snapshots are captured under the lock to ensure the Timer
+        // object is valid. The actual invocation happens outside the lock.
+        Timer* t = GetTimersHead();
+        while (t != nullptr)
+        {
+            if (count >= dmq::MAX_TIMER_EXPIRED) {
+                LOG_ERROR("Timer::ProcessTimers MAX_TIMER_EXPIRED exceeded");
+                ASSERT_TRUE(count < dmq::MAX_TIMER_EXPIRED);
+                break;
+            }
+
+            if (t->CheckExpired())
+            {
+                snapshots[count++] = t->OnExpired.GetSnapshot();
+            }
+            t = t->m_next;
+        }
     }
 
-    // Iterate safely handling potential deletion during callback
-    auto it = GetTimers().begin();
-    while (it != GetTimers().end())
+    // Call the client's expired callback functions outside the lock.
+    // This allows callbacks to perform thread-safe operations (like DataBus::Publish)
+    // without risking a deadlock with the global timer lock.
+    // The Snapshot holds shared_ptrs to the delegates, so even if a Timer 
+    // was deleted on another thread after the lock was released, the 
+    // callback targets remain valid.
+    for (size_t i = 0; i < count; ++i)
     {
-        Timer* t = *it;
-
-        // INCREMENT NOW: Move 'it' to the next element BEFORE calling the function
-        // that might delete the current element 't'.
-        it++;
-
-        // Now call the function. If 't' destroys itself, it is removed from the list,
-        // but our local 'it' variable is already safe at the next node.
-        if (t != nullptr)
-            t->CheckExpired();
+        dmq::Signal<void()>::InvokeSnapshot(snapshots[i]);
+        snapshots[i] = {};  // release shared_ptr refs so delegates aren't held between calls
     }
 }
 
@@ -196,3 +212,5 @@ dmq::TimePoint Timer::GetNow()
     // to your custom resolution (millis) inside the time_point wrapper.
     return std::chrono::time_point_cast<dmq::Duration>(dmq::Clock::now());
 }
+
+} // namespace dmq::util

@@ -29,12 +29,12 @@ using namespace dmq;
 // Worker threads for multi-threaded examples
 // ---------------------------------------------------------------------------
 static const int WORKER_THREAD_CNT = 2;
-Thread workerThreads[] = {
+dmq::os::Thread workerThreads[] = {
     { "WorkerThread1" },
     { "WorkerThread2" }
 };
 
-Thread callbackThread("CallbackThread");
+dmq::os::Thread callbackThread("CallbackThread");
 
 static std::mutex        printMutex;
 static std::mutex        cvMtx;
@@ -47,7 +47,7 @@ std::atomic<bool> processTimerExit{false};
 static void ProcessTimers()
 {
     while (!processTimerExit.load()) {
-        Timer::ProcessTimers();
+        dmq::util::Timer::ProcessTimers();
         std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
 }
@@ -100,7 +100,7 @@ void example2(async::AsyncHttp& http)
 {
     printf_safe("\n--- Example 2: Uninterrupted Sequence on HTTP Thread ---\n");
 
-    Thread* httpThread = http.get_thread();
+    dmq::os::Thread* httpThread = http.get_thread();
     auto delegate = MakeDelegate(&RunSequenceOnHttpThread, *httpThread, async::MAX_WAIT);
     auto retVal = delegate.AsyncInvoke(&http);
     if (retVal.has_value())

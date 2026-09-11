@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <stddef.h>
+#include <atomic>
 
 // @see https://github.com/endurodave/xallocator
 // David Lafreniere
@@ -22,20 +23,40 @@
 /// any static user objects relying on xallocator will be destroyed first before 
 /// xalloc_destroy() is called. 
 /// Embedded systems that never exit can remove the XallocInitDestroy class entirely. 
+namespace dmq {
 class XallocInitDestroy
 {
 public:
 	XallocInitDestroy();
 	~XallocInitDestroy();
 private:
-	static int32_t refCount;
+	static std::atomic<int32_t> refCount;
 };
-static XallocInitDestroy xallocInitDestroy;
+} // namespace dmq
+static dmq::XallocInitDestroy xallocInitDestroy;
 #endif	// AUTOMATIC_XALLOCATOR_INIT_DESTROY
 #endif	// __cplusplus
 
 #ifdef __cplusplus
 extern "C" {
+#endif
+
+#ifdef DMQ_ALLOCATOR_SAFEGUARDS
+#define XALLOC_BLOCK_HEADER_SIZE 16
+#define XALLOC_BLOCK_FOOTER_SIZE 4
+#define XALLOC_MAGIC   0x414C4C4F  // "ALLO"
+#define XALLOC_FREED   0xDEADBEEF
+#define XALLOC_CANARY  0xAA55AA55
+#else
+#define XALLOC_BLOCK_HEADER_SIZE (sizeof(void*) > 4 ? 16 : 8)
+#define XALLOC_BLOCK_FOOTER_SIZE 0
+#endif
+
+/// Forward declaration of Allocator class
+#ifdef __cplusplus
+namespace dmq {
+    class Allocator;
+}
 #endif
 
 /// This function must be called exactly one time before the operating system
@@ -53,6 +74,13 @@ void xalloc_init();
 /// the program exits. If using C++, ~XallocInitDestroy() must call xalloc_destroy automatically.
 /// Embedded systems that never exit need not call this function at all. 
 void xalloc_destroy();
+
+/// Get an Allocator instance based upon the client's requested block size.
+/// @param[in] size - the client's requested block size.
+/// @return An Allocator instance that handles blocks of the requested size.
+#ifdef __cplusplus
+dmq::Allocator* xallocator_get_allocator(size_t size);
+#endif
 
 /// Allocate a block of memory
 /// @param[in] size - the size of the block to allocate. 
@@ -88,24 +116,29 @@ void xalloc_stats();
     //
     //   // GOOD: Allocates fixed-block memory (Uses XALLOCATOR)
     //   std::shared_ptr<MyMsg> msg(new MyMsg());
+    #include "delegate/DelegateOpt.h"
     #define XALLOCATOR \
         public: \
             void* operator new(size_t size) { \
-                return xmalloc(size); \
+                void* p = xmalloc(size); \
+                if (!p) BAD_ALLOC(); \
+                return p; \
             } \
-            void* operator new(size_t size, void* mem) { \
+            void* operator new(size_t /*size*/, void* mem) { \
                 return mem; \
             } \
-            void* operator new(size_t size, const std::nothrow_t& nt) { \
+            void* operator new(size_t size, const std::nothrow_t& /*nt*/) { \
                 return xmalloc(size); \
             } \
             void* operator new[](size_t size) { \
-                return xmalloc(size); \
+                void* p = xmalloc(size); \
+                if (!p) BAD_ALLOC(); \
+                return p; \
             } \
             void operator delete(void* pObject) { \
                 xfree(pObject); \
             } \
-            void operator delete(void* pObject, const std::nothrow_t& nt) { \
+            void operator delete(void* pObject, const std::nothrow_t& /*nt*/) { \
                 xfree(pObject); \
             } \
             void operator delete[](void* pData) { \

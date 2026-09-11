@@ -5,7 +5,7 @@
 #include "task.h"
 #include <chrono>
 
-namespace dmq {
+namespace dmq::os {
     struct FreeRTOSClock {
         // 1. Define duration traits.
         // NOTE: This assumes configTICK_RATE_HZ is 1000 (1ms ticks).
@@ -31,13 +31,19 @@ namespace dmq {
 
             TickType_t cur = xTaskGetTickCount();
 
-            // Determine the rollover modulus based on the width of TickType_t.
-            // This makes the logic portable for both 16-bit and 32-bit FreeRTOS ticks.
-            constexpr uint64_t TICK_MODULO = static_cast<uint64_t>(1ULL) << (sizeof(TickType_t) * 8);
+            // If TickType_t is 64-bit, we don't need the rollover logic as it essentially never wraps.
+            // This also prevents a compilation error (shift count >= width of type).
+            if (sizeof(TickType_t) < 8) {
+                // Determine the rollover modulus based on the width of TickType_t.
+                // This makes the logic portable for both 16-bit and 32-bit FreeRTOS ticks.
+                // Note: Use a ternary to ensure we never shift by 64 even during constexpr evaluation.
+                constexpr uint32_t SHIFT_AMT = (sizeof(TickType_t) < 8) ? (sizeof(TickType_t) * 8) : 0;
+                constexpr uint64_t TICK_MODULO = static_cast<uint64_t>(1ULL) << SHIFT_AMT;
 
-            // Check for wrap-around
-            if (cur < last) {
-                high += TICK_MODULO;
+                // Check for wrap-around
+                if (cur < last) {
+                    high += TICK_MODULO;
+                }
             }
 
             last = cur;
@@ -50,6 +56,6 @@ namespace dmq {
             return time_point(duration(static_cast<rep>(ticks)));
         }
     };
-}
+} // namespace dmq::os
 
 #endif // FREERTOS_CLOCK_H
