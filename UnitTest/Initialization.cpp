@@ -12,9 +12,9 @@ using namespace async;
 static void Test_InitAndThread(AsyncHttp& http)
 {
     dmq::os::Thread* thread = http.get_thread();
-    ASSERT_TRUE(thread != nullptr);
-    ASSERT_TRUE(!thread->GetThreadName().empty());
-    ASSERT_TRUE(thread->GetThreadId() != std::thread::id());
+    DMQ_ASSERT_TRUE(thread != nullptr);
+    DMQ_ASSERT_TRUE(!thread->GetThreadName().empty());
+    DMQ_ASSERT_TRUE(thread->GetThreadId() != std::thread::id());
 }
 
 // -----------------------------------------------------------------------------
@@ -24,8 +24,8 @@ static void Test_DoubleInit(AsyncHttp& http)
 {
     http.init();  // already initialized — should be a no-op
     dmq::os::Thread* thread = http.get_thread();
-    ASSERT_TRUE(thread != nullptr);
-    ASSERT_TRUE(thread->GetThreadId() != std::thread::id());
+    DMQ_ASSERT_TRUE(thread != nullptr);
+    DMQ_ASSERT_TRUE(thread->GetThreadId() != std::thread::id());
 }
 
 // -----------------------------------------------------------------------------
@@ -37,7 +37,7 @@ static void Test_BasicRequestAfterInit(AsyncHttp& http)
 
     // Either the request succeeded or there was a network error.
     // Either way, statusCode is well-defined and no crash occurred.
-    ASSERT_TRUE(resp.statusCode == 200 || !resp.error.empty());
+    DMQ_ASSERT_TRUE(resp.statusCode == 200 || !resp.error.empty());
 }
 
 // -----------------------------------------------------------------------------

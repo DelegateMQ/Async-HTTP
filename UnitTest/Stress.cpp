@@ -47,7 +47,7 @@ static void Test_Stress_BlockingConcurrent(AsyncHttp& http)
         std::cout << "  Note: " << failCount.load() << " requests failed (network?)" << std::endl;
 
     // All requests must complete — no hangs or crashes
-    ASSERT_TRUE(successCount.load() + failCount.load() == expected);
+    DMQ_ASSERT_TRUE(successCount.load() + failCount.load() == expected);
 
     std::cout << "  Blocking stress: " << successCount.load() << "/" << expected
               << " succeeded" << std::endl;
@@ -84,7 +84,7 @@ static void Test_Stress_CallbackConcurrent(AsyncHttp& http)
            std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    ASSERT_TRUE(callbackCount.load() == TOTAL);
+    DMQ_ASSERT_TRUE(callbackCount.load() == TOTAL);
     std::cout << "  Callback stress: all " << TOTAL << " callbacks received" << std::endl;
 }
 
@@ -124,14 +124,14 @@ static void Test_Stress_Mixed(AsyncHttp& http)
         if (th.joinable()) th.join();
 
     // All blocking calls must have finished (threads joined above)
-    ASSERT_TRUE(blockingDone.load() == N);
+    DMQ_ASSERT_TRUE(blockingDone.load() == N);
 
     // Wait for the non-blocking callbacks
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (callbackDone.load() < N && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    ASSERT_TRUE(callbackDone.load() == N);
+    DMQ_ASSERT_TRUE(callbackDone.load() == N);
     std::cout << "  Mixed stress: " << blockingDone.load() << " blocking + "
               << callbackDone.load() << " callback requests completed" << std::endl;
 }

@@ -41,8 +41,8 @@ static void Test_Get_SyncCallback(AsyncHttp& http)
     http.Get("https://httpbin.org/get", MakeDelegate(fn));
 
     bool ok = WaitForFlag(fired, std::chrono::seconds(15));
-    ASSERT_TRUE(ok);
-    ASSERT_TRUE(receivedStatus.load() == 200);
+    DMQ_ASSERT_TRUE(ok);
+    DMQ_ASSERT_TRUE(receivedStatus.load() == 200);
 
     std::cout << "  Get() sync callback fired, status=" << receivedStatus.load() << std::endl;
 }
@@ -67,8 +67,8 @@ static void Test_Get_AsyncCallback(AsyncHttp& http)
              MakeDelegate(fn, callerThread));
 
     bool ok = WaitForFlag(fired, std::chrono::seconds(15));
-    ASSERT_TRUE(ok);
-    ASSERT_TRUE(receivedStatus.load() == 200);
+    DMQ_ASSERT_TRUE(ok);
+    DMQ_ASSERT_TRUE(receivedStatus.load() == 200);
 
     callerThread.ExitThread();
     std::cout << "  Get() async callback fired on callerThread, status="
@@ -98,10 +98,10 @@ static void Test_Post_SyncCallback(AsyncHttp& http)
               MakeDelegate(fn));
 
     bool ok = WaitForFlag(fired, std::chrono::seconds(15));
-    ASSERT_TRUE(ok);
+    DMQ_ASSERT_TRUE(ok);
     {
         std::lock_guard<std::mutex> lock(bodyMutex);
-        ASSERT_TRUE(receivedBody.find("sensor") != std::string::npos);
+        DMQ_ASSERT_TRUE(receivedBody.find("sensor") != std::string::npos);
     }
     std::cout << "  Post() sync callback fired, body contains posted data" << std::endl;
 }
@@ -115,7 +115,7 @@ static void Test_MultipleCallbacks(AsyncHttp& http)
     std::atomic<int> count{0};
 
     std::function<void(HttpResponse)> fn = [&](HttpResponse resp) {
-        ASSERT_TRUE(resp.ok());
+        DMQ_ASSERT_TRUE(resp.ok());
         count.fetch_add(1);
     };
 
@@ -127,7 +127,7 @@ static void Test_MultipleCallbacks(AsyncHttp& http)
     while (count.load() < N && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    ASSERT_TRUE(count.load() == N);
+    DMQ_ASSERT_TRUE(count.load() == N);
     std::cout << "  " << N << " concurrent Get() callbacks all received" << std::endl;
 }
 

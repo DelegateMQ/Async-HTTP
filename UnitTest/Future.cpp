@@ -16,14 +16,14 @@ using namespace async;
 static void Test_GetFuture_Success(AsyncHttp& http)
 {
     auto future = http.Get_future("https://httpbin.org/get");
-    ASSERT_TRUE(future.valid());
+    DMQ_ASSERT_TRUE(future.valid());
 
     // Main thread can do other work here...
 
     HttpResponse resp = future.get();
-    ASSERT_TRUE(resp.ok());
-    ASSERT_TRUE(resp.statusCode == 200);
-    ASSERT_TRUE(!resp.body.empty());
+    DMQ_ASSERT_TRUE(resp.ok());
+    DMQ_ASSERT_TRUE(resp.statusCode == 200);
+    DMQ_ASSERT_TRUE(!resp.body.empty());
 
     std::cout << "  Get_future resolved, status=" << resp.statusCode << std::endl;
 }
@@ -36,8 +36,8 @@ static void Test_GetFuture_404(AsyncHttp& http)
     auto future = http.Get_future("https://httpbin.org/status/404");
     HttpResponse resp = future.get();
 
-    ASSERT_TRUE(!resp.ok());
-    ASSERT_TRUE(resp.statusCode == 404);
+    DMQ_ASSERT_TRUE(!resp.ok());
+    DMQ_ASSERT_TRUE(resp.statusCode == 404);
 
     std::cout << "  Get_future 404 confirmed" << std::endl;
 }
@@ -50,11 +50,11 @@ static void Test_PostFuture_Success(AsyncHttp& http)
     auto future = http.Post_future("https://httpbin.org/post",
                                    "{\"reading\":3.14}",
                                    "application/json");
-    ASSERT_TRUE(future.valid());
+    DMQ_ASSERT_TRUE(future.valid());
 
     HttpResponse resp = future.get();
-    ASSERT_TRUE(resp.ok());
-    ASSERT_TRUE(resp.body.find("reading") != std::string::npos);
+    DMQ_ASSERT_TRUE(resp.ok());
+    DMQ_ASSERT_TRUE(resp.body.find("reading") != std::string::npos);
 
     std::cout << "  Post_future resolved, body contains posted data" << std::endl;
 }
@@ -77,7 +77,7 @@ static void Test_MultipleFutures(AsyncHttp& http)
         if (resp.ok()) ++okCount;
     }
 
-    ASSERT_TRUE(okCount == N);
+    DMQ_ASSERT_TRUE(okCount == N);
     std::cout << "  " << N << " futures all resolved 200 OK" << std::endl;
 }
 
@@ -96,8 +96,8 @@ static void Test_FutureOverlap(AsyncHttp& http)
     }
 
     HttpResponse resp = future.get();  // block only if not yet done
-    ASSERT_TRUE(workDone == 5);
-    ASSERT_TRUE(resp.ok() || !resp.error.empty());  // either success or network error
+    DMQ_ASSERT_TRUE(workDone == 5);
+    DMQ_ASSERT_TRUE(resp.ok() || !resp.error.empty());  // either success or network error
 
     std::cout << "  Main thread completed " << workDone
               << " units of work while HTTP was in-flight" << std::endl;

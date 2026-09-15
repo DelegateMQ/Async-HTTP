@@ -14,10 +14,10 @@ static void Test_GetWait_Success(AsyncHttp& http)
 {
     HttpResponse resp = http.GetWait("https://httpbin.org/get", std::chrono::seconds(10));
 
-    ASSERT_TRUE(resp.ok());
-    ASSERT_TRUE(resp.statusCode == 200);
-    ASSERT_TRUE(!resp.body.empty());
-    ASSERT_TRUE(resp.error.empty());
+    DMQ_ASSERT_TRUE(resp.ok());
+    DMQ_ASSERT_TRUE(resp.statusCode == 200);
+    DMQ_ASSERT_TRUE(!resp.body.empty());
+    DMQ_ASSERT_TRUE(resp.error.empty());
 
     std::cout << "  GetWait 200 OK (body length=" << resp.body.size() << ")" << std::endl;
 }
@@ -29,9 +29,9 @@ static void Test_GetWait_404(AsyncHttp& http)
 {
     HttpResponse resp = http.GetWait("https://httpbin.org/status/404", std::chrono::seconds(10));
 
-    ASSERT_TRUE(!resp.ok());
-    ASSERT_TRUE(resp.statusCode == 404);
-    ASSERT_TRUE(resp.error.empty());  // HTTP error, not a transport error
+    DMQ_ASSERT_TRUE(!resp.ok());
+    DMQ_ASSERT_TRUE(resp.statusCode == 404);
+    DMQ_ASSERT_TRUE(resp.error.empty());  // HTTP error, not a transport error
 
     std::cout << "  GetWait 404 status confirmed" << std::endl;
 }
@@ -44,8 +44,8 @@ static void Test_GetWait_ConnectionError(AsyncHttp& http)
     HttpResponse resp = http.GetWait("http://this.host.does.not.exist.invalid/",
                                      std::chrono::seconds(10));
 
-    ASSERT_TRUE(!resp.ok());
-    ASSERT_TRUE(!resp.error.empty());
+    DMQ_ASSERT_TRUE(!resp.ok());
+    DMQ_ASSERT_TRUE(!resp.error.empty());
 
     std::cout << "  GetWait connection error: " << resp.error << std::endl;
 }
@@ -61,10 +61,10 @@ static void Test_PostWait_Success(AsyncHttp& http)
     HttpResponse resp = http.PostWait("https://httpbin.org/post", body, contentType,
                                       std::chrono::seconds(10));
 
-    ASSERT_TRUE(resp.ok());
-    ASSERT_TRUE(resp.statusCode == 200);
+    DMQ_ASSERT_TRUE(resp.ok());
+    DMQ_ASSERT_TRUE(resp.statusCode == 200);
     // httpbin echoes the posted body in the "data" field of the JSON response
-    ASSERT_TRUE(resp.body.find("key") != std::string::npos);
+    DMQ_ASSERT_TRUE(resp.body.find("key") != std::string::npos);
 
     std::cout << "  PostWait 200 OK (body length=" << resp.body.size() << ")" << std::endl;
 }
@@ -77,8 +77,8 @@ static void Test_PostWait_StatusError(AsyncHttp& http)
     HttpResponse resp = http.PostWait("https://httpbin.org/status/400", "", "text/plain",
                                       std::chrono::seconds(10));
 
-    ASSERT_TRUE(!resp.ok());
-    ASSERT_TRUE(resp.statusCode == 400);
+    DMQ_ASSERT_TRUE(!resp.ok());
+    DMQ_ASSERT_TRUE(resp.statusCode == 400);
 
     std::cout << "  PostWait 400 status confirmed" << std::endl;
 }
@@ -90,7 +90,7 @@ static void Test_SequentialRequests(AsyncHttp& http)
 {
     for (int i = 0; i < 3; ++i) {
         HttpResponse resp = http.GetWait("https://httpbin.org/get", std::chrono::seconds(10));
-        ASSERT_TRUE(resp.ok());
+        DMQ_ASSERT_TRUE(resp.ok());
     }
     std::cout << "  3 sequential requests succeeded" << std::endl;
 }
