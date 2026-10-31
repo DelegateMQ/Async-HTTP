@@ -108,7 +108,10 @@ static void Test_Stress_Mixed(AsyncHttp& http)
         threads.emplace_back([&http, &blockingDone]() {
             HttpResponse resp = http.GetWait("https://httpbin.org/get",
                                              std::chrono::seconds(15));
-            if (resp.ok() || !resp.error.empty())
+            // Count every completed request: a status from the server (even 4xx/5xx,
+            // which httpbin.org returns under load) or a transport error/timeout.
+            // This test checks thread safety, not the remote service.
+            if (resp.statusCode != 0 || !resp.error.empty())
                 blockingDone.fetch_add(1);
         });
     }
