@@ -10,6 +10,9 @@ target_include_directories(HttpLib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 # libcurl is a public dependency — consumers of HttpLib also need the headers/libs
 target_link_libraries(HttpLib PUBLIC CURL::libcurl)
 
+# async_http.h includes DelegateMQ.h
+target_link_libraries(HttpLib PUBLIC DelegateMQ::DelegateMQ)
+
 # Add /bigobj flag for MSVC
 if (MSVC)
     target_compile_options(HttpLib PRIVATE /bigobj)

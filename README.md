@@ -194,16 +194,22 @@ For high-concurrency scenarios requiring many simultaneous requests to the same 
 
 # Getting Started
 
-[CMake](https://cmake.org/) is used to create the project build files on any Windows or Linux machine. [libcurl](https://curl.se/libcurl/) must be available on the system.
+[CMake](https://cmake.org/) 3.16 or newer is used to create the project build files on any Windows or Linux machine. [libcurl](https://curl.se/libcurl/) must be available on the system.
 
 1. Clone the repository.
 2. Install libcurl (via [vcpkg](https://vcpkg.io/) or a system package manager).
 3. From the repository root, run one of the following CMake commands:
    ```
-   cmake -B Build .
-   cmake -B Build . -DCMAKE_TOOLCHAIN_FILE=<path-to-vcpkg>/scripts/buildsystems/vcpkg.cmake
+   cmake -B build .
+   cmake -B build . -DCMAKE_TOOLCHAIN_FILE=<path-to-vcpkg>/scripts/buildsystems/vcpkg.cmake
    ```
-4. Build and run the project within the `Build` directory.
+4. Build and run the project within the `build` directory.
+
+[DelegateMQ](https://github.com/DelegateMQ/DelegateMQ) is fetched from GitHub by CMake's `FetchContent` when CMake configures, at the release tag set by `DMQ_GIT_TAG` in `CMakeLists.txt` (currently `v2.4.1`), and the code links the `DelegateMQ::DelegateMQ` target. Options:
+
+* Another release: `cmake -B build . -DDMQ_GIT_TAG=<tag>`
+* A local DelegateMQ checkout instead of GitHub: `-DFETCHCONTENT_SOURCE_DIR_DELEGATEMQ=<path>`
+* No network after the first configure: `-DFETCHCONTENT_FULLY_DISCONNECTED=ON`
 
 # Delegate Quick Start
 
