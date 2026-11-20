@@ -1,10 +1,15 @@
 # Example CMake command line to create project build files:
 #
-# cmake -B Build .
-# cmake -B Build . -DCMAKE_TOOLCHAIN_FILE=<path-to-vcpkg>/scripts/buildsystems/vcpkg.cmake
+# cmake -B build .
+# cmake -B build . -DCMAKE_TOOLCHAIN_FILE=<path-to-vcpkg>/scripts/buildsystems/vcpkg.cmake
+#
+# DelegateMQ is fetched from GitHub at the release tag DMQ_GIT_TAG when CMake
+# configures. To build against a local DelegateMQ checkout instead, add
+# -DFETCHCONTENT_SOURCE_DIR_DELEGATEMQ=<path>. To configure again without
+# network access, add -DFETCHCONTENT_FULLY_DISCONNECTED=ON.
 
 # Specify the minimum CMake version required
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.16)
 
 # Project name and language
 project(Async-HTTP VERSION 1.0 LANGUAGES C CXX)
@@ -15,7 +20,18 @@ set (DMQ_UTIL "ON")
 set (DMQ_THREAD "DMQ_THREAD_STDLIB")
 set (DMQ_SERIALIZE "DMQ_SERIALIZE_NONE")
 set (DMQ_TRANSPORT "DMQ_TRANSPORT_NONE")
-include("${CMAKE_SOURCE_DIR}/DelegateMQ/DelegateMQ.cmake")
+
+# DelegateMQ release to build against
+set(DMQ_GIT_TAG "v2.4.1" CACHE STRING "DelegateMQ release tag (or branch) to fetch")
+
+include(FetchContent)
+FetchContent_Declare(
+    delegatemq
+    GIT_REPOSITORY https://github.com/DelegateMQ/DelegateMQ.git
+    GIT_TAG        ${DMQ_GIT_TAG}
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(delegatemq)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
@@ -27,23 +43,14 @@ find_package(CURL REQUIRED)
 # Collect all .cpp and *.h source files in the current directory
 file(GLOB SOURCES "*.cpp" "*.h")
 
-# Collect DelegateMQ predef source files
-list(APPEND SOURCES ${DMQ_PORT_SOURCES})
-
-# Organize delegate source files within IDE (Visual Studio)
-source_group("Delegate Files" FILES ${DMQ_LIB_SOURCES})
-source_group("Port Files" FILES ${DMQ_PORT_ONLY_SOURCES})
-source_group("Extras Files" FILES ${DMQ_EXTRAS_SOURCES})
-
 # Add subdirectories to include path
 include_directories(
-    ${DMQ_ROOT_DIR}
     HTTP
     UnitTest
 )
 
 # Add an executable target
-add_executable(Async-HTTPApp ${SOURCES} ${DMQ_LIB_SOURCES})
+add_executable(Async-HTTPApp ${SOURCES})
 
 # Add subdirectories to build
 add_subdirectory(HTTP)
