@@ -271,6 +271,8 @@ namespace async {
         int     init();
         int     shutdown(dmq::Duration timeout = MAX_WAIT);
         Thread* get_thread();
+        // Retry HTTP 429 (Too Many Requests): default 3 retries, 1 s apart (or Retry-After)
+        void    SetRateLimitRetry(int maxRetries, dmq::Duration retryDelay = std::chrono::seconds(1));
 
         // Blocking API
         HttpResponse GetWait(const std::string& url, dmq::Duration timeout = MAX_WAIT);

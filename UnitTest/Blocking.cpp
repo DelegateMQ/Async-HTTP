@@ -96,6 +96,36 @@ static void Test_SequentialRequests(AsyncHttp& http)
 }
 
 // -----------------------------------------------------------------------------
+// Test 7: HTTP 429 is retried, then returned once the retries run out
+// -----------------------------------------------------------------------------
+static void Test_RateLimitRetry(AsyncHttp& http)
+{
+    // httpbin.org/status/429 always answers 429: 2 retries, 200 ms apart (or the
+    // server's Retry-After, if it sends one), so at least 400 ms before the result.
+    http.SetRateLimitRetry(2, std::chrono::milliseconds(200));
+    auto start = std::chrono::steady_clock::now();
+    HttpResponse resp = http.GetWait("https://httpbin.org/status/429", std::chrono::seconds(30));
+    auto elapsed = std::chrono::steady_clock::now() - start;
+
+    // Back to the default (3 retries, 1 s apart) for the remaining tests
+    http.SetRateLimitRetry(3);
+
+    DMQ_ASSERT_TRUE(resp.statusCode == 429);
+    DMQ_ASSERT_TRUE(resp.error.empty());
+    DMQ_ASSERT_TRUE(elapsed >= std::chrono::milliseconds(400));
+
+    // Retries off: the 429 comes back at once
+    http.SetRateLimitRetry(0);
+    resp = http.GetWait("https://httpbin.org/status/429", std::chrono::seconds(30));
+    http.SetRateLimitRetry(3);
+    DMQ_ASSERT_TRUE(resp.statusCode == 429);
+
+    std::cout << "  GetWait 429 retried, then returned ("
+              << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
+              << " ms)" << std::endl;
+}
+
+// -----------------------------------------------------------------------------
 // Main entry point
 // -----------------------------------------------------------------------------
 void Blocking_UT(AsyncHttp& http)
@@ -108,6 +138,7 @@ void Blocking_UT(AsyncHttp& http)
     Test_PostWait_Success(http);
     Test_PostWait_StatusError(http);
     Test_SequentialRequests(http);
+    Test_RateLimitRetry(http);
 
     std::cout << "HTTP Blocking API Tests Passed!" << std::endl;
 }
