@@ -32,6 +32,7 @@
 
 #include "DelegateMQ.h"
 #include <curl/curl.h>
+#include <atomic>
 #include <future>
 #include <string>
 #include <chrono>
@@ -87,6 +88,19 @@ namespace async {
         /// Accessor for the internal worker thread (e.g. to dispatch work directly onto it).
         dmq::os::Thread* get_thread();
 
+        /// Retry a request that gets HTTP 429 (Too Many Requests) up to maxRetries times.
+        /// Each retry waits for the server's Retry-After (capped at MAX_RETRY_AFTER) or, if
+        /// the server sends none, retryDelay. Default: 3 retries, 1 s apart.
+        /// @note The wait runs on the worker thread, so while a request is rate limited it
+        ///       holds up the requests queued behind it (about 3 s each with the defaults).
+        ///       If the retries run out, the last 429 response is returned. Set maxRetries
+        ///       to 0 to get a 429 back at once. Callable from any thread.
+        void SetRateLimitRetry(int maxRetries,
+                               dmq::Duration retryDelay = std::chrono::seconds(1));
+
+        /// Longest Retry-After wait honored by the rate-limit retry.
+        static constexpr std::chrono::seconds MAX_RETRY_AFTER{5};
+
         // -------------------------------------------------------------------------
         // Blocking API — caller blocks until response arrives or timeout expires
         // -------------------------------------------------------------------------
@@ -126,8 +140,13 @@ namespace async {
         dmq::os::Thread m_thread;
         CURL*  m_curl = nullptr;
         bool   m_running = false;
+        std::atomic<int>       m_maxRetries{3};
+        std::atomic<long long> m_retryDelayMs{1000};
 
         static size_t WriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata);
+
+        /// Run the request set up on m_curl, retrying on HTTP 429. Runs on m_thread.
+        HttpResponse Perform();
 
         HttpResponse HttpGet(const std::string& url);
         HttpResponse HttpPost(const std::string& url,

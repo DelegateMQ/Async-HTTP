@@ -6,6 +6,7 @@
 #include "async_http.h"
 #include "DelegateMQ.h"
 #include <curl/curl.h>
+#include <algorithm>
 #include <any>
 #include <functional>
 #include <future>
@@ -112,25 +113,13 @@ namespace async {
         HttpResponse resp;
         if (!m_curl) { resp.error = "Not initialized"; return resp; }
 
-        std::string body;
         curl_easy_reset(m_curl);
         curl_easy_setopt(m_curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(m_curl, CURLOPT_HTTPGET, 1L);
         curl_easy_setopt(m_curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(m_curl, CURLOPT_WRITEDATA, &body);
         curl_easy_setopt(m_curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(m_curl, CURLOPT_TIMEOUT, 10L);
-
-        CURLcode res = curl_easy_perform(m_curl);
-        if (res != CURLE_OK) {
-            resp.error = curl_easy_strerror(res);
-        } else {
-            long code = 0;
-            curl_easy_getinfo(m_curl, CURLINFO_RESPONSE_CODE, &code);
-            resp.statusCode = static_cast<int>(code);
-            resp.body = std::move(body);
-        }
-        return resp;
+        return Perform();
     }
 
     HttpResponse AsyncHttp::HttpPost(const std::string& url,
@@ -140,7 +129,6 @@ namespace async {
         HttpResponse resp;
         if (!m_curl) { resp.error = "Not initialized"; return resp; }
 
-        std::string respBody;
         struct curl_slist* headers = nullptr;
         std::string ctHeader = "Content-Type: " + contentType;
         headers = curl_slist_append(headers, ctHeader.c_str());
@@ -152,22 +140,52 @@ namespace async {
         curl_easy_setopt(m_curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
         curl_easy_setopt(m_curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(m_curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(m_curl, CURLOPT_WRITEDATA, &respBody);
         curl_easy_setopt(m_curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(m_curl, CURLOPT_TIMEOUT, 10L);
 
-        CURLcode res = curl_easy_perform(m_curl);
+        resp = Perform();
         curl_slist_free_all(headers);
+        return resp;
+    }
 
-        if (res != CURLE_OK) {
-            resp.error = curl_easy_strerror(res);
-        } else {
+    HttpResponse AsyncHttp::Perform()
+    {
+        for (int attempt = 0; ; ++attempt) {
+            HttpResponse resp;
+            std::string body;
+            curl_easy_setopt(m_curl, CURLOPT_WRITEDATA, &body);
+
+            CURLcode res = curl_easy_perform(m_curl);
+            if (res != CURLE_OK) {
+                resp.error = curl_easy_strerror(res);
+                return resp;
+            }
             long code = 0;
             curl_easy_getinfo(m_curl, CURLINFO_RESPONSE_CODE, &code);
             resp.statusCode = static_cast<int>(code);
-            resp.body = std::move(respBody);
+            resp.body = std::move(body);
+
+            if (code != 429 || attempt >= m_maxRetries.load())
+                return resp;
+
+            // Rate limited: wait, then send the same request again
+            std::chrono::milliseconds wait(m_retryDelayMs.load());
+#if LIBCURL_VERSION_NUM >= 0x074200   // CURLINFO_RETRY_AFTER: libcurl 7.66.0
+            curl_off_t retryAfter = 0;  // seconds; 0 if the server sent none
+            if (curl_easy_getinfo(m_curl, CURLINFO_RETRY_AFTER, &retryAfter) == CURLE_OK &&
+                retryAfter > 0)
+                wait = std::min<std::chrono::milliseconds>(
+                    std::chrono::seconds(retryAfter), MAX_RETRY_AFTER);
+#endif
+            std::this_thread::sleep_for(wait);
         }
-        return resp;
+    }
+
+    void AsyncHttp::SetRateLimitRetry(int maxRetries, dmq::Duration retryDelay)
+    {
+        m_maxRetries.store(maxRetries < 0 ? 0 : maxRetries);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(retryDelay).count();
+        m_retryDelayMs.store(ms < 0 ? 0 : static_cast<long long>(ms));
     }
 
     // Runs on m_thread: execute GET then invoke callback

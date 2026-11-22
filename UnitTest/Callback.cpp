@@ -81,13 +81,13 @@ static void Test_Get_AsyncCallback(AsyncHttp& http)
 static void Test_Post_SyncCallback(AsyncHttp& http)
 {
     std::atomic<bool> fired{false};
-    std::string       receivedBody;
+    HttpResponse      received;
     std::mutex        bodyMutex;
 
     std::function<void(HttpResponse)> fn = [&](HttpResponse resp) {
         {
             std::lock_guard<std::mutex> lock(bodyMutex);
-            receivedBody = resp.body;
+            received = resp;
         }
         fired.store(true);
     };
@@ -101,7 +101,11 @@ static void Test_Post_SyncCallback(AsyncHttp& http)
     DMQ_ASSERT_TRUE(ok);
     {
         std::lock_guard<std::mutex> lock(bodyMutex);
-        DMQ_ASSERT_TRUE(receivedBody.find("sensor") != std::string::npos);
+        if (received.body.find("sensor") == std::string::npos)
+            std::cout << "  Post() failed: status=" << received.statusCode
+                      << " error=\"" << received.error << "\" body=\""
+                      << received.body.substr(0, 200) << "\"" << std::endl;
+        DMQ_ASSERT_TRUE(received.body.find("sensor") != std::string::npos);
     }
     std::cout << "  Post() sync callback fired, body contains posted data" << std::endl;
 }
